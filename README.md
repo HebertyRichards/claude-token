@@ -33,6 +33,26 @@ the raw transcripts of the last 60 days at zero token cost — instead of
 resuming a heavy chat (which reloads the whole history, uncached, full price)
 you take the useful snippet into a fresh session.
 
+**TOON / log compactor** — `toon` shrinks what you're about to paste into a
+prompt. A JSON payload with a uniform listing becomes TOON (fields declared
+once, then values only — ~40-50% smaller); other JSON is minified; log text
+(console.log, stack traces, prints) gets ANSI codes stripped and consecutive
+duplicate lines collapsed into `line  [xN]`. This must happen before pasting —
+no hook can rewrite pasted content.
+
+```
+$ claude-token toon hoteis.json
+hoteis[4]{id,nome,estrelas,preco,disponivel,cidade}:
+ 101,Hotel Copacabana,5,890.5,true,Rio de Janeiro
+ 102,Pousada do Sol,3,210.0,true,Búzios
+ ...
+[TOON] ~111 -> ~57 tokens (49% smaller) — paste the output above into the prompt.
+```
+
+The token estimate goes to stderr, so stdout pipes clean to the clipboard
+(`claude-token toon data.json | xclip -selection c`). Everything it prints is
+English — its output is destined for the model's context, not just your eyes.
+
 **Statusline** — live in the terminal, short lines that fit small screens:
 
 ```
@@ -83,6 +103,7 @@ cache  [--days N]      prompt cache efficiency and cold-turn waste (default 7)
 index  [path]          build the RAG index for a project (rerun after big changes)
 search <query>         BM25 search over the indexed project
 recall <query>         search past sessions: digests first, then transcripts
+toon   [file]          compact JSON/logs before pasting (also reads stdin)
 tips                   spot token-wasting config
 ```
 

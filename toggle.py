@@ -83,8 +83,8 @@ def install_slash_command():
     with open(os.path.join(cmd_dir, "token.md"), "w", encoding="utf-8") as f:
         f.write(
             "---\n"
-            "description: Economia de tokens — status, report, cache, index, recall, tips, on/off\n"
-            "argument-hint: [status|report|cache|index|search|recall|tips|on|off]\n"
+            "description: Economia de tokens — status, report, cache, index, recall, toon, tips, on/off\n"
+            "argument-hint: [status|report|cache|index|search|recall|toon|tips|on|off]\n"
             "allowed-tools: Bash(claude-token:*)\n"
             "---\n\n"
             "!`claude-token $ARGUMENTS`\n\n"
