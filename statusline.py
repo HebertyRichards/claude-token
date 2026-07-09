@@ -2,8 +2,9 @@
 totals, and ONE clear money comparison against the no-ECO baseline."""
 import json
 import sys
+from datetime import datetime, timezone
 
-from common import CONTEXT_WINDOW, fmt_k, load_state, price_for
+from common import CONTEXT_WINDOW, fmt_k, load_state, parse_ts, price_for
 from usage import segment_usage
 
 
@@ -37,6 +38,11 @@ def cmd_statusline():
     # Warm cache = last turn mostly reused cached input (10% of the price);
     # cold = it re-wrote the cache (idle >5min, fresh session or post-compact).
     warm = u.get("cache_read_input_tokens", 0) > u.get("cache_creation_input_tokens", 0)
+    # The cache TTL is 5 min: past it, the next turn rewrites the cache no
+    # matter how warm the last one was — flip to cold by wall clock.
+    last = parse_ts(entries[-1][0]) if entries else None
+    if last and (datetime.now(timezone.utc) - last).total_seconds() > 300:
+        warm = False
     cache = "cache🔥" if warm else "cache🧊"
 
     st = load_state()
