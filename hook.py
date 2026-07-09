@@ -5,7 +5,38 @@ import os
 import subprocess
 import sys
 
-from common import GUARD_ENV, HOME
+from common import CONTEXT_WINDOW, GUARD_ENV, HOME
+from rag import hook_hits as rag_hits
+from usage import tail_usage
+
+# Prompts that are plain questions get routed: no rewrite, concise-answer
+# directive, and a /model haiku tip — instead of a full agentic response.
+QUESTION_STARTS = (
+    "o que", "oq ", "como", "qual", "quais", "por que", "porque", "pq ",
+    "quando", "onde", "explique", "me explica", "é possível", "e possivel",
+    "dá pra", "da pra", "what", "how", "why", "which", "explain", "is it",
+    "can i", "does",
+)
+BUILD_VERBS = ("crie", "criar", "faça", "faca", "implemente", "refatore",
+               "adicione", "escreva", "monte", "gere", "corrija", "ajuste",
+               "mude", "analise", "analisa", "planeje", "planeja", "otimize",
+               "verifique", "create", "implement", "build", "add", "write",
+               "fix", "refactor", "change", "analyze", "plan", "optimize",
+               "review")
+
+
+def is_simple_question(prompt, words):
+    p = prompt.lower().strip()
+    if words > 40 or any(v in p for v in BUILD_VERBS):
+        return False
+    return p.endswith("?") or any(p.startswith(q) for q in QUESTION_STARTS)
+
+
+def context_pct(transcript):
+    u = tail_usage(transcript or "") or {}
+    ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+           + u.get("cache_creation_input_tokens", 0))
+    return ctx / CONTEXT_WINDOW * 100
 
 
 def cmd_hook():
@@ -22,11 +53,42 @@ def cmd_hook():
     if prompt.startswith(("/", "!")) or words < 4 or words > 200:
         return
 
+    # Notes are read by the model, not the user — English tokenizes ~20% cheaper.
+    notes = []
+    # Context pruning nudge: history is the silent token leak — every response
+    # pays for it. Above 70% fill, stop rereads and surface /compact.
+    pct = context_pct(data.get("transcript_path"))
+    if pct >= 70:
+        notes.append(
+            f"[claude-token] Context {pct:.0f}% full: do not reread files "
+            "already read, quote only snippets, and suggest /compact to the "
+            "user (or /clear if the topic changed).")
+
+    # Model routing (lite): plain questions don't need the Haiku rewrite nor
+    # an agentic answer — skip the rewrite entirely and ask for a short reply.
+    if is_simple_question(prompt, words):
+        notes.append(
+            "[claude-token] Simple question: answer briefly and directly, no "
+            "tools unless needed. If the session is questions-only, mention "
+            "that /model haiku is ~5x cheaper.")
+        print("\n".join(notes))
+        return
+
+
+    # RAG: point Claude at the relevant line ranges up front so it reads
+    # snippets instead of dumping whole files into context.
+    cwd = data.get("cwd") or os.getcwd()
+    hits = rag_hits(cwd, prompt)
+    if hits:
+        notes.append(
+            "[claude-token] RAG — likely relevant spots (Read only these "
+            "ranges with offset/limit instead of whole files): "
+            + " · ".join(hits))
+
     # Feed project conventions (CLAUDE.md / AGENTS.md) to the rewriter so the
     # optimized prompt already matches the project's language and patterns —
     # code that comes out right the first time is the biggest token saving.
     conventions = ""
-    cwd = data.get("cwd") or os.getcwd()
     for name in ("CLAUDE.md", "AGENTS.md"):
         try:
             with open(os.path.join(cwd, name), encoding="utf-8", errors="replace") as f:
@@ -39,7 +101,9 @@ def cmd_hook():
         "in English for a coding agent. Keep every explicit detail and the "
         "original intent; add nothing new; state that unrequested extras "
         "(tests, docs, alternatives, boilerplate) must be skipped. "
-        "Output only the rewritten prompt.\n"
+        "If the text is not an actionable task (a question, an opinion, a "
+        "remark), just translate it to English verbatim. Output only the "
+        "result — never commentary or questions about the request.\n"
     )
     if conventions:
         meta += ("\nMake the rewritten prompt follow these project "
@@ -54,6 +118,9 @@ def cmd_hook():
         )
         rewritten = out.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
-        return  # fail silently: the original prompt still goes through
+        rewritten = ""  # fail silently: the original prompt still goes through
     if rewritten:
-        print(f"[claude-token] Optimized reading of the request — follow it: {rewritten}")
+        notes.append(
+            f"[claude-token] Optimized reading of the request — follow it: {rewritten}")
+    if notes:
+        print("\n".join(notes))

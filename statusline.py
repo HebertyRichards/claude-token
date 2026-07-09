@@ -31,6 +31,10 @@ def cmd_statusline():
            + u.get("cache_creation_input_tokens", 0))
     pct = ctx / CONTEXT_WINDOW * 100
     dot = "🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
+    # Warm cache = last turn mostly reused cached input (10% of the price);
+    # cold = it re-wrote the cache (idle >5min or fresh session).
+    warm = u.get("cache_read_input_tokens", 0) > u.get("cache_creation_input_tokens", 0)
+    cache = "cache🔥" if warm else "cache🧊"
     cost = (data.get("cost") or {}).get("total_cost_usd") or 0.0
 
     st = load_state()
@@ -48,7 +52,7 @@ def cmd_statusline():
                          + usage.get("cache_read_input_tokens", 0)
                          + usage.get("cache_creation_input_tokens", 0))
 
-    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{CONTEXT_WINDOW//1000}k ({pct:.0f}%) {dot}")
+    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{CONTEXT_WINDOW//1000}k ({pct:.0f}%) {dot} | {cache}")
     b_read, b_out, b_cost = (st.get("baseline_read"), st.get("baseline_out"),
                              st.get("baseline_cost"))
     if on and turns and b_read and b_out and b_cost:

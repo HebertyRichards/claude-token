@@ -38,8 +38,8 @@ def cmd_on():
     install_slash_command()
     install_symlink()
 
-    print("ON — prompts get rewritten by Haiku; statusline shows live usage.")
-    print("Takes effect on the next Claude Code session.")
+    print("LIGADO — prompts serão reescritos pelo Haiku; statusline com uso ao vivo.")
+    print("Vale a partir da próxima sessão do Claude Code.")
 
 
 def cmd_off():
@@ -61,15 +61,15 @@ def cmd_off():
     if ps and ps[-1].get("end") is None:
         ps[-1]["end"] = now_iso()
         save_json(STATE, st)
-    print("OFF — hook and statusline removed.")
+    print("DESLIGADO — hook e statusline removidos.")
 
 
 def cmd_status():
-    print("ON" if is_on() else "OFF")
+    print("LIGADO" if is_on() else "DESLIGADO")
     ps = load_state().get("periods", [])
     if ps:
         p = ps[-1]
-        print(f"last period: {p['start']} -> {p.get('end') or 'now'}")
+        print(f"último período: {p['start']} -> {p.get('end') or 'agora'}")
 
 
 def install_slash_command():
@@ -79,13 +79,14 @@ def install_slash_command():
     with open(os.path.join(cmd_dir, "token.md"), "w", encoding="utf-8") as f:
         f.write(
             "---\n"
-            "description: Economia de tokens — status, report, tips, on/off\n"
-            "argument-hint: [status|report|tips|on|off]\n"
+            "description: Economia de tokens — status, report, cache, index, tips, on/off\n"
+            "argument-hint: [status|report|cache|index|search|tips|on|off]\n"
             "allowed-tools: Bash(claude-token:*)\n"
             "---\n\n"
             "!`claude-token $ARGUMENTS`\n\n"
-            "Mostre ao usuário a saída acima exatamente como está, sem "
-            "reformatar nem resumir.\n"
+            # This line is read by the model — English tokenizes cheaper.
+            "Show the user the output above exactly as is; do not reformat "
+            "or summarize.\n"
         )
 
 
