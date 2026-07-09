@@ -30,8 +30,43 @@ def iter_usage(path):
     return seen.values()
 
 
+def segment_usage(path):
+    """Usage since the last /compact boundary — what the live context holds.
+    Returns (entries, carried): entries as in iter_usage but only after the
+    boundary, and carried = context tokens the compact summary kept
+    (compactMetadata.postTokens; 0 if the session was never compacted)."""
+    seen, carried = {}, 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"compact_boundary"' in line:
+                    try:
+                        meta = json.loads(line).get("compactMetadata") or {}
+                    except json.JSONDecodeError:
+                        meta = {}
+                    seen, carried = {}, meta.get("postTokens", 0)
+                    continue
+                if '"usage"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                m = d.get("message") or {}
+                u = m.get("usage")
+                if not u or d.get("isSidechain"):
+                    continue
+                seen[m.get("id") or d.get("uuid")] = (
+                    d.get("timestamp", ""), m.get("model", ""), u)
+    except OSError:
+        pass
+    return list(seen.values()), carried
+
+
 def tail_usage(path, size=131072):
-    """Latest usage block, reading only the file tail (keeps statusline fast)."""
+    """Latest usage block, reading only the file tail (keeps hooks fast).
+    If a /compact boundary is the most recent event, returns a synthetic
+    usage holding only the tokens the summary carried over."""
     try:
         with open(path, "rb") as f:
             f.seek(max(0, os.path.getsize(path) - size))
@@ -39,6 +74,12 @@ def tail_usage(path, size=131072):
     except OSError:
         return None
     for line in reversed(lines):
+        if '"compact_boundary"' in line:
+            try:
+                meta = json.loads(line).get("compactMetadata") or {}
+            except json.JSONDecodeError:
+                meta = {}
+            return {"input_tokens": meta.get("postTokens", 0)}
         if '"usage"' not in line:
             continue
         try:

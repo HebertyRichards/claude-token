@@ -3,8 +3,8 @@ totals, and ONE clear money comparison against the no-ECO baseline."""
 import json
 import sys
 
-from common import CONTEXT_WINDOW, fmt_k, load_state
-from usage import iter_usage, tail_usage
+from common import CONTEXT_WINDOW, fmt_k, load_state, price_for
+from usage import segment_usage
 
 
 def compare(actual, normal, money=False):
@@ -26,31 +26,38 @@ def cmd_statusline():
         data = {}
     model = (data.get("model") or {}).get("display_name", "?")
     transcript = data.get("transcript_path", "")
-    u = tail_usage(transcript) or {}
+    # Only what came after the last /compact counts: the boundary resets
+    # everything here, and /clear starts a new transcript file anyway.
+    entries, carried = segment_usage(transcript) if transcript else ([], 0)
+    u = entries[-1][2] if entries else {}
     ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
-           + u.get("cache_creation_input_tokens", 0))
+           + u.get("cache_creation_input_tokens", 0)) or carried
     pct = ctx / CONTEXT_WINDOW * 100
     dot = "🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
     # Warm cache = last turn mostly reused cached input (10% of the price);
-    # cold = it re-wrote the cache (idle >5min or fresh session).
+    # cold = it re-wrote the cache (idle >5min, fresh session or post-compact).
     warm = u.get("cache_read_input_tokens", 0) > u.get("cache_creation_input_tokens", 0)
     cache = "cache🔥" if warm else "cache🧊"
-    cost = (data.get("cost") or {}).get("total_cost_usd") or 0.0
 
     st = load_state()
     ps = st.get("periods", [])
     on = bool(ps) and ps[-1].get("end") is None
     eco = "ECO✅ ON (/token off desliga)" if on else "ECO❌ OFF (/token on liga)"
 
-    # Session totals: responses, tokens read (input+cache) and written (output).
+    # Segment totals: responses, tokens read (input+cache), written (output)
+    # and estimated cost — all restart from zero after a /compact.
     turns = out_tok = read_tok = 0
-    if transcript:
-        for _ts, _model, usage in iter_usage(transcript):
-            turns += 1
-            out_tok += usage.get("output_tokens", 0)
-            read_tok += (usage.get("input_tokens", 0)
-                         + usage.get("cache_read_input_tokens", 0)
-                         + usage.get("cache_creation_input_tokens", 0))
+    cost = 0.0
+    for _ts, mdl, usage in entries:
+        turns += 1
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        cr = usage.get("cache_read_input_tokens", 0)
+        cw = usage.get("cache_creation_input_tokens", 0)
+        out_tok += out
+        read_tok += inp + cr + cw
+        pi, po, pcr, pcw = price_for(mdl)
+        cost += (inp * pi + out * po + cr * pcr + cw * pcw) / 1e6
 
     print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{CONTEXT_WINDOW//1000}k ({pct:.0f}%) {dot} | {cache}")
     b_read, b_out, b_cost = (st.get("baseline_read"), st.get("baseline_out"),
