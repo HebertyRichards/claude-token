@@ -16,9 +16,12 @@ def cmd_on():
     if os.path.exists(SETTINGS) and not os.path.exists(BACKUP):
         shutil.copy2(SETTINGS, BACKUP)
 
-    ups = settings.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
-    if not any(MARKER in json.dumps(h) for h in ups):
-        ups.append({"hooks": [{"type": "command", "command": f"{ENTRY} hook"}]})
+    hooks = settings.setdefault("hooks", {})
+    for event, sub in (("UserPromptSubmit", "hook"), ("SessionEnd", "digest")):
+        entries = hooks.setdefault(event, [])
+        if not any(MARKER in json.dumps(h) for h in entries):
+            entries.append(
+                {"hooks": [{"type": "command", "command": f"{ENTRY} {sub}"}]})
     settings["statusLine"] = {"type": "command", "command": f"{ENTRY} statusline"}
     save_json(SETTINGS, settings)
 
@@ -45,11 +48,12 @@ def cmd_on():
 def cmd_off():
     settings = load_json(SETTINGS, {})
     hooks = settings.get("hooks", {})
-    kept = [h for h in hooks.get("UserPromptSubmit", []) if MARKER not in json.dumps(h)]
-    if kept:
-        hooks["UserPromptSubmit"] = kept
-    else:
-        hooks.pop("UserPromptSubmit", None)
+    for event in ("UserPromptSubmit", "SessionEnd"):
+        kept = [h for h in hooks.get(event, []) if MARKER not in json.dumps(h)]
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)
     if not hooks:
         settings.pop("hooks", None)
     if MARKER in json.dumps(settings.get("statusLine", {})):
@@ -79,8 +83,8 @@ def install_slash_command():
     with open(os.path.join(cmd_dir, "token.md"), "w", encoding="utf-8") as f:
         f.write(
             "---\n"
-            "description: Economia de tokens — status, report, cache, index, tips, on/off\n"
-            "argument-hint: [status|report|cache|index|search|tips|on|off]\n"
+            "description: Economia de tokens — status, report, cache, index, recall, tips, on/off\n"
+            "argument-hint: [status|report|cache|index|search|recall|tips|on|off]\n"
             "allowed-tools: Bash(claude-token:*)\n"
             "---\n\n"
             "!`claude-token $ARGUMENTS`\n\n"
