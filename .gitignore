@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local/secret files — never commit personal data or credentials
+.env
+*.local
+*.log
+*.tmp
+*.bak*
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store
