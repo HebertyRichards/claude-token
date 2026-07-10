@@ -1,13 +1,93 @@
 """Paste preprocessor: shrink what the user is about to paste into a prompt.
 JSON with a uniform listing becomes TOON (fields declared once, values only);
-anything else is treated as log text (dedupe repeated lines, strip ANSI).
+HTML gets DOM-stripped (scripts/styles/decor out, selectors kept); anything
+else is treated as log text (dedupe repeated lines, strip ANSI).
 The token saving happens BEFORE pasting — hooks can't rewrite pasted content."""
 import json
 import re
 import sys
+from html.parser import HTMLParser
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 PLAIN = re.compile(r"^[^,\n\"]+$")  # cell values that don't need quoting
+HTMLISH = re.compile(r"<\s*(!doctype|html|head|body|div|nav|main|section)\b",
+                     re.I)
+# DOM analysis needs selectors and structure — keep those; scripts, styles,
+# inline SVG and visual noise are ~90% of the bytes and carry no meaning.
+DOM_KEEP_ATTRS = {"id", "class", "href", "src", "name", "type", "role", "alt",
+                  "placeholder", "value", "title", "for", "action", "method"}
+DOM_SKIP_TAGS = {"script", "style", "svg", "noscript", "template", "canvas",
+                 "iframe", "link", "meta"}
+DOM_VOID = {"link", "meta", "br", "hr", "img", "input"}
+BLOCK_END = re.compile(r"(</(?:div|section|article|ul|ol|li|tr|table|form|"
+                       r"main|header|footer|nav|p|h[1-6])>)")
+
+
+class DomStripper(HTMLParser):
+    """keep: what the user's analysis targets — 'script' preserves <script>
+    blocks and on* handlers; 'css' preserves <style> blocks and style= attrs.
+    Default strips both: structure/selectors only."""
+
+    def __init__(self, keep=frozenset()):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip, self.raw = [], 0, 0
+        self.keep = keep
+        self.skip_tags = DOM_SKIP_TAGS - (
+            {"script"} if "script" in keep else set()) - (
+            {"style"} if "css" in keep else set())
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.skip_tags:
+            if tag not in DOM_VOID:
+                self.skip += 1
+            return
+        if self.skip:
+            return
+        if tag in ("script", "style"):
+            self.raw += 1
+        kept = []
+        for k, v in attrs:
+            ok = (k in DOM_KEEP_ATTRS or k.startswith(("data-", "aria-"))
+                  or ("css" in self.keep and k == "style")
+                  or ("script" in self.keep and k.startswith("on")))
+            if ok and v and not v.startswith("data:"):
+                kept.append(f'{k}="{v[:200 if self.raw else 80]}"')
+        self.out.append("<" + tag + (" " + " ".join(kept) if kept else "") + ">")
+
+    def handle_endtag(self, tag):
+        if tag in self.skip_tags:
+            if tag not in DOM_VOID and self.skip:
+                self.skip -= 1
+            return
+        if self.skip or tag in DOM_VOID:
+            return
+        if tag in ("script", "style") and self.raw:
+            self.raw -= 1
+        self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self.skip:
+            return
+        if self.raw:
+            # kept JS/CSS: collapsing newlines would swallow code after //
+            # comments — trim per line instead.
+            d = "\n".join(l.strip() for l in data.splitlines() if l.strip())
+            if d:
+                self.out.append("\n" + d + "\n")
+        else:
+            d = " ".join(data.split())
+            if d:
+                self.out.append(d)
+
+
+def strip_dom(text, keep=frozenset()):
+    p = DomStripper(keep)
+    try:
+        p.feed(text)
+        p.close()
+    except Exception:  # malformed HTML: keep whatever was parsed so far
+        pass
+    return BLOCK_END.sub("\\1\n", "".join(p.out)).strip("\n")
 
 
 def cell(v):
@@ -76,18 +156,37 @@ def compact_log(text):
 
 
 def cmd_toon(argv):
-    if argv:
+    # --keep script,css: preserve what the analysis targets (JS and/or CSS);
+    # aliases: js -> script, style -> css.
+    keep, files, i = set(), [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--keep" and i + 1 < len(argv):
+            keep |= {t.strip().lower() for t in argv[i + 1].split(",")}
+            i += 2
+            continue
+        if a.startswith("--keep="):
+            keep |= {t.strip().lower() for t in a[7:].split(",")}
+            i += 1
+            continue
+        files.append(a)
+        i += 1
+    keep = {{"js": "script", "style": "css"}.get(k, k) for k in keep}
+
+    if files:
         try:
-            with open(argv[0], encoding="utf-8", errors="replace") as f:
+            with open(files[0], encoding="utf-8", errors="replace") as f:
                 raw = f.read()
         except OSError as e:
-            print(f"cannot read {argv[0]}: {e}", file=sys.stderr)
+            print(f"cannot read {files[0]}: {e}", file=sys.stderr)
             return
     elif not sys.stdin.isatty():
         raw = sys.stdin.read()
     else:
-        print("usage: claude-token toon <file>   (or pipe via stdin)\n"
-              "       JSON listing -> TOON; log/text -> repeated lines become [xN]",
+        print("usage: claude-token toon [--keep script,css] <file>   (or pipe via stdin)\n"
+              "       JSON listing -> TOON; HTML -> stripped DOM (--keep "
+              "preserves JS/CSS when analyzing those); log/text -> repeated "
+              "lines become [xN]",
               file=sys.stderr)
         return
 
@@ -98,8 +197,13 @@ def cmd_toon(argv):
         result = to_toon(json.loads(raw))
         mode = "TOON"
     except json.JSONDecodeError:
-        result = compact_log(raw)
-        mode = "compacted log"
+        if HTMLISH.search(raw[:2000]):
+            result = strip_dom(raw, keep)
+            mode = "stripped DOM" + (f" (kept: {', '.join(sorted(keep))})"
+                                     if keep else "")
+        else:
+            result = compact_log(raw)
+            mode = "compacted log"
 
     print(result, flush=True)  # flush so stats (stderr) come after the content
     # Stats go to stderr so stdout can be piped straight to the clipboard.

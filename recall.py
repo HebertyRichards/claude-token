@@ -79,8 +79,13 @@ def cmd_digest():
     if not summary:  # offline fallback: keep the raw skeleton, still searchable
         summary = "(raw, no model available)\n" + skeleton[:3000]
 
+    # Digests hold conversation content (raw text in the offline fallback):
+    # dir 0700 + file 0600 so no other local user can read them.
     os.makedirs(DIGEST_DIR, exist_ok=True)
-    with open(os.path.join(DIGEST_DIR, sid + ".md"), "w", encoding="utf-8") as f:
+    os.chmod(DIGEST_DIR, 0o700)
+    out_path = os.path.join(DIGEST_DIR, sid + ".md")
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
         f.write(f"# session {sid}\n"
                 f"- project: {data.get('cwd', '?')}\n"
                 f"- date: {time.strftime('%Y-%m-%d %H:%M')}\n\n{summary}\n")

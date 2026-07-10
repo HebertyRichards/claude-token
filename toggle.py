@@ -17,7 +17,8 @@ def cmd_on():
         shutil.copy2(SETTINGS, BACKUP)
 
     hooks = settings.setdefault("hooks", {})
-    for event, sub in (("UserPromptSubmit", "hook"), ("SessionEnd", "digest")):
+    for event, sub in (("UserPromptSubmit", "hook"), ("SessionEnd", "digest"),
+                       ("PostToolUse", "posttool")):
         entries = hooks.setdefault(event, [])
         if not any(MARKER in json.dumps(h) for h in entries):
             entries.append(
@@ -48,7 +49,7 @@ def cmd_on():
 def cmd_off():
     settings = load_json(SETTINGS, {})
     hooks = settings.get("hooks", {})
-    for event in ("UserPromptSubmit", "SessionEnd"):
+    for event in ("UserPromptSubmit", "SessionEnd", "PostToolUse"):
         kept = [h for h in hooks.get(event, []) if MARKER not in json.dumps(h)]
         if kept:
             hooks[event] = kept

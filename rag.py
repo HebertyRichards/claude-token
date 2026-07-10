@@ -17,6 +17,12 @@ EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp",
         ".yaml", ".yml", ".toml"}
 SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build", "out",
              ".venv", "venv", "target", ".idea", ".vscode", "vendor"}
+# Never index secret-bearing files: the index itself only stores token
+# frequencies, but a hit would tell Claude to READ the file — putting the
+# secret into the context and the transcript.
+SECRET_FILE = re.compile(
+    r"(^|[._-])(secrets?|credentials?|passwords?|passwd|apikeys?|api_keys?)"
+    r"([._-]|$)|^\.env", re.I)
 CHUNK, STEP = 40, 30          # lines per chunk / stride (10-line overlap)
 MAX_FILE = 1_000_000          # skip files bigger than ~1 MB
 WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
@@ -62,7 +68,7 @@ def cmd_index(argv):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
                        and not d.startswith(".")]
         for name in filenames:
-            if os.path.splitext(name)[1] not in EXTS:
+            if os.path.splitext(name)[1] not in EXTS or SECRET_FILE.search(name):
                 continue
             full = os.path.join(dirpath, name)
             try:

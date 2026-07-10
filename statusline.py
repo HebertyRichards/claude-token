@@ -94,13 +94,21 @@ def plan_usage_line(rate_limits):
 def compare(actual, normal, money=False):
     # Every value is labeled so there is no doubt which number is which:
     # "com ECO $1.80 · sem ECO ~$6.94 · você economizou $5.14 ✔"
+    # Only money is real spending ("economizou/gastou a mais"). Token lines
+    # compare against the OFF per-turn average: a long session resends a big
+    # (mostly cached, 10%-priced) context every turn, so raw tokens can sit
+    # above the average while cost still wins — the custo line is the verdict.
     def f(v):
         return f"${v:.2f}" if money else fmt_k(int(v))
     diff = normal - actual
     both = f"com ECO {f(actual)} · sem ECO ~{f(normal)}"
+    if money:
+        if diff >= 0:
+            return f"{both} · você economizou {f(diff)} ✔"
+        return f"{both} · gastou {f(-diff)} a mais ▲"
     if diff >= 0:
-        return f"{both} · você economizou {f(diff)} ✔"
-    return f"{both} · gastou {f(-diff)} a mais ▲"
+        return f"{both} · {f(diff)} abaixo da sua média ✔"
+    return f"{both} · {f(-diff)} acima da sua média (custo decide) ▲"
 
 
 def cmd_statusline():

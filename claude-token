@@ -19,6 +19,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from hook import cmd_hook
+from lean import cmd_posttool
 from rag import cmd_index, cmd_search
 from recall import cmd_digest, cmd_recall
 from report import cmd_cache, cmd_report, cmd_tips
@@ -32,7 +33,7 @@ def main():
     fn = {
         "on": cmd_on, "off": cmd_off, "status": cmd_status,
         "hook": cmd_hook, "statusline": cmd_statusline, "tips": cmd_tips,
-        "digest": cmd_digest,
+        "digest": cmd_digest, "posttool": cmd_posttool,
         "report": lambda: cmd_report(sys.argv[2:]),
         "cache": lambda: cmd_cache(sys.argv[2:]),
         "index": lambda: cmd_index(sys.argv[2:]),
