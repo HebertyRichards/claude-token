@@ -3,13 +3,32 @@ import glob
 import os
 from datetime import datetime, timedelta, timezone
 
-from common import CLAUDE_DIR, HOME, PROJECTS, fmt_k, load_json, parse_ts, price_for
+from common import (CLAUDE_DIR, HOME, PROJECTS, fmt_k, load_json, parse_ts,
+                    price_for, price_warnings)
 from usage import collect, iter_usage
+
+
+def arg_days(argv, default):
+    """--days N, tolerating a missing or non-numeric value."""
+    if "--days" not in argv:
+        return default
+    i = argv.index("--days") + 1
+    try:
+        n = int(argv[i])
+    except (IndexError, ValueError):
+        print(f"--days sem número válido; usando {default}")
+        return default
+    return n if n > 0 else default
+
+
+def show_price_warnings():
+    for line in price_warnings():
+        print(line)
 
 
 def cmd_cache(argv):
     """Prompt-cache efficiency: hit rate, cold turns and the money they cost."""
-    days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 7
+    days = arg_days(argv, 7)
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     inp = cr = cw = turns = cold = 0
     waste = 0.0
@@ -27,8 +46,9 @@ def cmd_cache(argv):
             inp += i; cr += r; cw += w
             if w > r:  # cold turn: rebuilt the cache instead of reusing it
                 cold += 1
-                _, _, pcr, pcw = price_for(model)
-                waste += w * (pcw - pcr) / 1e6  # extra vs a warm cache read
+                p = price_for(model)
+                if p:
+                    waste += w * (p[3] - p[2]) / 1e6  # extra vs a warm cache read
 
     total_in = inp + cr + cw
     hit = cr / total_in * 100 if total_in else 0
@@ -38,6 +58,7 @@ def cmd_cache(argv):
     print(f"  regravada     {fmt_k(cw)} (custa 125%)")
     print(f"turnos frios    {cold}/{turns} "
           f"(custo extra ~US$ {waste:,.2f} vs cache quente)")
+    show_price_warnings()
     print("""
 Como manter o cache quente:
   - responda/continue em menos de 5 min (TTL do cache)
@@ -47,13 +68,18 @@ Como manter o cache quente:
 
 
 def cmd_report(argv):
-    days = int(argv[argv.index("--days") + 1]) if "--days" in argv else 30
+    """Straight totals from the transcripts. Deliberately NOT a ligado-vs-
+    desligado comparison: the optimizer is meant to stay on, so there is no
+    matched off-period to compare against, and a per-turn average from an
+    unrelated stretch of past work is not a measurement of what it saved."""
+    days = arg_days(argv, 30)
     b = collect(days)
-    on, off = b["on"], b["off"]
+    t = {k: b["on"][k] + b["off"][k] for k in b["on"]}
 
     print(f"\nclaude-token • últimos {days} dias • custos são ESTIMATIVAS\n")
-    print(f"{'':22}{'DESLIGADO':>15}{'LIGADO':>15}")
-    print("-" * 52)
+    if not t["turns"]:
+        print("Nenhuma resposta no período.\n")
+        return
     for label, key, fmt in [
         ("respostas", "turns", "{:,}"),
         ("tokens de entrada", "inp", "{:,}"),
@@ -62,20 +88,13 @@ def cmd_report(argv):
         ("cache gravado", "cw", "{:,}"),
         ("custo (US$)", "cost", "{:,.2f}"),
     ]:
-        print(f"{label:22}{fmt.format(off[key]):>15}{fmt.format(on[key]):>15}")
-
-    if off["turns"] and on["turns"]:
-        avg_off, avg_on = off["out"] / off["turns"], on["out"] / on["turns"]
-        c_off, c_on = off["cost"] / off["turns"], on["cost"] / on["turns"]
-        print(f"\nmédia saída/resposta: {avg_off:,.0f} -> {avg_on:,.0f} tok "
-              f"({(1 - avg_on / avg_off) * 100:+.1f}% de economia)")
-        if c_off:
-            print(f"média custo/resposta: ${c_off:.4f} -> ${c_on:.4f} "
-                  f"({(1 - c_on / c_off) * 100:+.1f}%)")
-            print(f"total economizado ligado: ~US$ {(c_off - c_on) * on['turns']:,.2f}")
-    elif not on["turns"]:
-        print("\nAinda sem uso ligado. Ligue, use o Claude Code e rode o report de novo.")
-    print()
+        print(f"{label:22}{fmt.format(t[key]):>15}")
+    print(f"\nmédia por resposta: {t['out'] / t['turns']:,.0f} tok de saída · "
+          f"{(t['inp'] + t['cr'] + t['cw']) / t['turns']:,.0f} tok lidos · "
+          f"${t['cost'] / t['turns']:.4f}")
+    show_price_warnings()
+    print("\nEm plano de assinatura o dólar acima é referência: o limite que"
+          "\naperta é a janela do plano, que a statusline mostra ao vivo.\n")
 
 
 def cmd_tips():

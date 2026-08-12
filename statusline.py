@@ -7,8 +7,8 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-from common import (CLAUDE_DIR, CONTEXT_WINDOW, fmt_k, load_json, load_state,
-                    parse_ts, price_for, save_json)
+from common import (CLAUDE_DIR, CONTEXT_WINDOW, fmt_k, level, load_json,
+                    load_state, parse_ts, price_for, save_json)
 from usage import segment_usage
 
 
@@ -91,26 +91,6 @@ def plan_usage_line(rate_limits):
     return "uso do plano: " + " · ".join(parts) if parts else ""
 
 
-def compare(actual, normal, money=False):
-    # Every value is labeled so there is no doubt which number is which:
-    # "com ECO $1.80 · sem ECO ~$6.94 · você economizou $5.14 ✔"
-    # Only money is real spending ("economizou/gastou a mais"). Token lines
-    # compare against the OFF per-turn average: a long session resends a big
-    # (mostly cached, 10%-priced) context every turn, so raw tokens can sit
-    # above the average while cost still wins — the custo line is the verdict.
-    def f(v):
-        return f"${v:.2f}" if money else fmt_k(int(v))
-    diff = normal - actual
-    both = f"com ECO {f(actual)} · sem ECO ~{f(normal)}"
-    if money:
-        if diff >= 0:
-            return f"{both} · você economizou {f(diff)} ✔"
-        return f"{both} · gastou {f(-diff)} a mais ▲"
-    if diff >= 0:
-        return f"{both} · {f(diff)} abaixo da sua média ✔"
-    return f"{both} · {f(-diff)} acima da sua média (custo decide) ▲"
-
-
 def cmd_statusline():
     try:
         data = json.load(sys.stdin)
@@ -139,11 +119,15 @@ def cmd_statusline():
     st = load_state()
     ps = st.get("periods", [])
     on = bool(ps) and ps[-1].get("end") is None
-    eco = "ECO✅ ON (/token off desliga)" if on else "ECO❌ OFF (/token on liga)"
+    lv = level()
+    eco = f"ECO✅ nv{lv} (/token level N)" if on else "ECO❌ OFF (/token on liga)"
 
     # Segment totals: responses, tokens read (input+cache), written (output)
     # and estimated cost — all restart from zero after a /compact.
-    turns = out_tok = read_tok = 0
+    # These are direct measurements. There is deliberately no "without ECO"
+    # column: the original prompt is never run, so any such number would be a
+    # guess dressed as a measurement.
+    turns = out_tok = read_tok = unpriced = 0
     cost = 0.0
     for _ts, mdl, usage in entries:
         turns += 1
@@ -153,20 +137,19 @@ def cmd_statusline():
         cw = usage.get("cache_creation_input_tokens", 0)
         out_tok += out
         read_tok += inp + cr + cw
-        pi, po, pcr, pcw = price_for(mdl)
-        cost += (inp * pi + out * po + cr * pcr + cw * pcw) / 1e6
+        p = price_for(mdl)
+        if p:
+            pi, po, pcr, pcw = p
+            cost += (inp * pi + out * po + cr * pcr + cw * pcw) / 1e6
+        else:
+            unpriced += 1
 
     print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{CONTEXT_WINDOW//1000}k ({pct:.0f}%) {dot} | {cache}")
+    # The plan window is the headline: on a subscription it, not the dollar
+    # estimate, is what actually runs out.
     usage = plan_usage_line(data.get("rate_limits") or {})
     if usage:
         print(usage)
-    b_read, b_out, b_cost = (st.get("baseline_read"), st.get("baseline_out"),
-                             st.get("baseline_cost"))
-    if on and turns and b_read and b_out and b_cost:
-        # ON: one metric per line, every value explicitly labeled.
-        print(f"leitura: {compare(read_tok, turns * b_read)}")
-        print(f"saída:   {compare(out_tok, turns * b_out)}")
-        print(f"custo:   {compare(cost, turns * b_cost, money=True)}")
-    else:
-        # OFF (or no baseline yet): plain session totals.
-        print(f"sessão: leitura {fmt_k(read_tok)} · saída {fmt_k(out_tok)} · custo ${cost:.2f}")
+    tail = f" · {unpriced} turno(s) sem preço" if unpriced else ""
+    print(f"sessão ({turns} resp): leitura {fmt_k(read_tok)} · saída "
+          f"{fmt_k(out_tok)} · custo ~${cost:.2f}{tail}")

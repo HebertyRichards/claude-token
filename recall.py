@@ -1,19 +1,21 @@
-"""Session memory: auto-digest each session when it ends (SessionEnd hook),
-then `recall <query>` searches digests + transcripts locally — so past work
-can be consulted at zero context cost instead of resuming heavy chats."""
+"""Past sessions, addressed by id — zero model calls.
+
+Every conversation is already on disk in ~/.claude/projects/*/*.jsonl. There
+used to be a Haiku pass here that summarized each finished session so the
+summaries could be searched; it was deleted. Summarizing spends tokens to
+produce a lossy copy of a file that was already complete and free to read.
+`sessions` lists what exists, `recall` finds which ids mention something, and
+`memory <id>` prints what was actually done in one."""
 import glob
 import json
 import os
-import subprocess
 import sys
 import time
 
-from common import CLAUDE_DIR, GUARD_ENV, HOME, PROJECTS
+from common import PROJECTS
 from rag import tokenize
 
-DIGEST_DIR = os.path.join(CLAUDE_DIR, "claude-token-digests")
-MIN_SIZE = 50_000     # don't digest tiny sessions (nothing worth remembering)
-RECALL_DAYS = 60      # how far back transcript search goes
+RECALL_DAYS = 60
 
 
 def session_texts(path, cap=300):
@@ -28,12 +30,12 @@ def session_texts(path, cap=300):
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if d.get("isSidechain"):
+                if d.get("isSidechain") or d.get("isCompactSummary"):
                     continue
                 m = d.get("message") or {}
                 c = m.get("content")
                 if m.get("role") == "user" and isinstance(c, str):
-                    if not c.startswith("<"):  # skip harness-injected blocks
+                    if not c.startswith(("<", "/", "!")):
                         out.append("USER: " + c[:cap])
                 elif m.get("role") == "assistant" and isinstance(c, list):
                     for b in c:
@@ -44,51 +46,44 @@ def session_texts(path, cap=300):
     return out
 
 
-def cmd_digest():
-    """SessionEnd hook: summarize the finished session into a local digest."""
-    if os.environ.get(GUARD_ENV):  # digests of our own `claude -p` calls: skip
-        return
-    try:
-        data = json.load(sys.stdin)
-    except (json.JSONDecodeError, OSError):
-        return
-    path = data.get("transcript_path", "")
-    sid = data.get("session_id", "unknown")
-    if not path or not os.path.exists(path) or os.path.getsize(path) < MIN_SIZE:
-        return
+def iter_sessions(days):
+    """(mtime, path, id, project, first user prompt) for recent transcripts."""
+    cutoff = time.time() - days * 86400
+    for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if mt < cutoff:
+            continue
+        first = next((t[6:] for t in session_texts(p, cap=90)
+                      if t.startswith("USER: ")), "")
+        yield mt, p, os.path.splitext(os.path.basename(p))[0], \
+            os.path.basename(os.path.dirname(p)), first
 
-    parts = session_texts(path)
-    if not parts:
+
+def arg_days(argv, default):
+    if "--days" in argv:
+        i = argv.index("--days")
+        try:
+            return int(argv[i + 1])
+        except (IndexError, ValueError):
+            print(f"--days sem número — usando {default}", file=sys.stderr)
+    return default
+
+
+def cmd_sessions(argv):
+    """List past sessions by id. Reading a transcript costs nothing."""
+    days = arg_days(argv, 14)
+    rows = sorted(iter_sessions(days), reverse=True)
+    if not rows:
+        print(f"nenhuma sessão nos últimos {days} dias.")
         return
-    text = "\n".join(parts)
-    skeleton = text[:2000] + "\n...\n" + text[-6000:] if len(text) > 8000 else text
-
-    meta = (
-        "Summarize this coding session as a compact briefing in English: "
-        "goal, key decisions, files touched, bugs fixed and how, final state, "
-        "pending items. Max 250 words. Output only the briefing.\n\n" + skeleton
-    )
-    env = dict(os.environ, **{GUARD_ENV: "1"})
-    try:
-        out = subprocess.run(["claude", "-p", meta, "--model", "haiku"],
-                             capture_output=True, text=True, timeout=60,
-                             env=env, cwd=HOME)
-        summary = out.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        summary = ""
-    if not summary:  # offline fallback: keep the raw skeleton, still searchable
-        summary = "(raw, no model available)\n" + skeleton[:3000]
-
-    # Digests hold conversation content (raw text in the offline fallback):
-    # dir 0700 + file 0600 so no other local user can read them.
-    os.makedirs(DIGEST_DIR, exist_ok=True)
-    os.chmod(DIGEST_DIR, 0o700)
-    out_path = os.path.join(DIGEST_DIR, sid + ".md")
-    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with open(fd, "w", encoding="utf-8") as f:
-        f.write(f"# session {sid}\n"
-                f"- project: {data.get('cwd', '?')}\n"
-                f"- date: {time.strftime('%Y-%m-%d %H:%M')}\n\n{summary}\n")
+    print(f"{len(rows)} sessões nos últimos {days} dias "
+          f"(id curto basta em `claude-token memory <id>`):\n")
+    for mt, _, sid, proj, first in rows[:60]:
+        when = time.strftime("%d/%m %H:%M", time.localtime(mt))
+        print(f"{sid[:8]}  {when}  {proj[-28:]:<28}  {first[:60]}")
 
 
 def score(query_toks, text):
@@ -102,54 +97,42 @@ def score(query_toks, text):
 
 
 def cmd_recall(argv):
-    """Search past sessions (digests first, then transcripts) at zero token cost."""
-    if not argv:
-        print("uso: claude-token recall <o que você procura>")
+    """Find which past sessions mention something, and return their ids."""
+    days = arg_days(argv, RECALL_DAYS)
+    # Drop "--days N" from the query words, keeping any other digits: a search
+    # for "erro 500" must stay a search for "erro 500".
+    terms, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a == "--days":
+            skip = True
+        elif not a.startswith("--"):
+            terms.append(a)
+    if not terms:
+        print("uso: claude-token recall <o que você procura> [--days N]")
+        print("depois: claude-token memory <id>  (traz o que foi feito na sessão)")
         return
-    query = " ".join(argv)
-    q = set(tokenize(query))
+    q = set(tokenize(" ".join(terms)))
 
     hits = []
-    for p in glob.glob(os.path.join(DIGEST_DIR, "*.md")):
-        try:
-            with open(p, encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except OSError:
-            continue
-        s = score(q, text)
-        if s > 0:
-            hits.append((s, p, text))
-    hits.sort(key=lambda x: -x[0])
-
-    if hits:
-        print(f"\nresumos de sessões (top {min(3, len(hits))}):\n")
-        for s, p, text in hits[:3]:
-            print("=" * 60)
-            print(text.strip()[:1200])
-            print()
-    else:
-        print("\nnenhum resumo bate — procurando nos transcripts brutos...\n")
-
-    cutoff = time.time() - RECALL_DAYS * 86400
-    raw = []
-    for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
-        if os.path.getmtime(p) < cutoff:
-            continue
+    for mt, p, sid, proj, _ in iter_sessions(days):
         best, best_s = "", 0.0
         for t in session_texts(p, cap=400):
             s = score(q, t)
             if s > best_s:
                 best_s, best = s, t
         if best_s > 0:
-            raw.append((best_s, p, best))
-    raw.sort(key=lambda x: -x[0])
-    if raw:
-        print(f"trechos de conversas ({min(3, len(raw))}):\n")
-        for s, p, snippet in raw[:3]:
-            proj = os.path.basename(os.path.dirname(p))
-            when = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(p)))
-            print(f"[{when} · {proj}]\n  {snippet[:300]}\n")
-    elif not hits:
+            hits.append((best_s, mt, sid, proj, best))
+    if not hits:
         print("nada encontrado.")
-    print("dica: leve só o trecho útil para uma sessão NOVA — nunca dê resume "
-          "num chat pesado só para perguntar algo.")
+        return
+    hits.sort(reverse=True)
+    print(f"{min(6, len(hits))} sessões (id curto -> `claude-token memory <id>`):\n")
+    for _, mt, sid, proj, snippet in hits[:6]:
+        when = time.strftime("%d/%m %H:%M", time.localtime(mt))
+        print(f"[{sid[:8]}] {when} · {proj[-32:]}")
+        print(f"  {' '.join(snippet.split())[:220]}\n")
+    print("Traga só a sessão certa para um chat NOVO — nunca dê resume num "
+          "chat pesado só para consultar algo.")

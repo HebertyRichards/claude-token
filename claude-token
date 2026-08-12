@@ -3,14 +3,17 @@
 
 Comandos:
   on | off | status    liga/desliga o otimizador
-  report [--days N]    tokens/custo: ligado vs desligado
+  level [0-2]          quanto o harness injeta (sem arg: mostra os níveis)
+  memory [id]          o que foi feito numa sessão (padrão: a atual)
+  sessions [--days N]  lista sessões passadas por id
+  report [--days N]    tokens e custo do período
   cache [--days N]     eficiência do prompt cache e turnos frios
   index [caminho]      indexa o projeto para o RAG
   search <consulta>    busca BM25 no projeto indexado
-  recall <consulta>    busca em sessões passadas (resumos + transcripts)
-  toon [arquivo]       compacta JSON/logs antes de colar no prompt
+  recall <consulta>    acha em quais sessões passadas um assunto aparece
+  toon [arquivo]       compacta JSON/XML/HTML/logs/docx antes de colar no prompt
   tips                 aponta desperdícios de configuração
-  hook | statusline | digest    interno, chamado pelo Claude Code
+  hook | statusline | posttool     interno, chamado pelo Claude Code
 """
 import os
 import sys
@@ -20,11 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 from hook import cmd_hook
 from lean import cmd_posttool
+from memory import cmd_memory
 from rag import cmd_index, cmd_search
-from recall import cmd_digest, cmd_recall
+from recall import cmd_recall, cmd_sessions
 from report import cmd_cache, cmd_report, cmd_tips
 from statusline import cmd_statusline
-from toggle import cmd_off, cmd_on, cmd_status
+from toggle import cmd_level, cmd_off, cmd_on, cmd_status
 from toon import cmd_toon
 
 
@@ -33,12 +37,15 @@ def main():
     fn = {
         "on": cmd_on, "off": cmd_off, "status": cmd_status,
         "hook": cmd_hook, "statusline": cmd_statusline, "tips": cmd_tips,
-        "digest": cmd_digest, "posttool": cmd_posttool,
+        "posttool": cmd_posttool,
+        "memory": lambda: cmd_memory(sys.argv[2:]),
+        "level": lambda: cmd_level(sys.argv[2:]),
         "report": lambda: cmd_report(sys.argv[2:]),
         "cache": lambda: cmd_cache(sys.argv[2:]),
         "index": lambda: cmd_index(sys.argv[2:]),
         "search": lambda: cmd_search(sys.argv[2:]),
         "recall": lambda: cmd_recall(sys.argv[2:]),
+        "sessions": lambda: cmd_sessions(sys.argv[2:]),
         "toon": lambda: cmd_toon(sys.argv[2:]),
     }.get(cmd)
     if fn:

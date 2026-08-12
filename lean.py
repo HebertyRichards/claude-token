@@ -6,7 +6,7 @@ import json
 import os
 import sys
 
-from common import CLAUDE_DIR, load_json, save_json
+from common import CLAUDE_DIR, level, load_json, save_json
 
 SESSIONS = os.path.join(CLAUDE_DIR, "claude-token-sessions.json")
 BIG_RESULT = 20_000   # chars (~5k tokens): a tool result this big gets flagged
@@ -63,7 +63,15 @@ def lean_note(cwd, session_id):
         pass
     hints = test_hints(cwd)
     runners = f" ({'; '.join(hints)})" if hints else ""
-    return ("[claude-token] Lean-output rules for this session: run tests "
+    return ("[claude-token] Before starting any implementation: once you have "
+            "actually looked at the code, state the real scope in one line "
+            "(which files, roughly how much), then use AskUserQuestion to let "
+            "the user choose — continue on this model, or delegate to a "
+            "subagent on a cheaper one. Never estimate scope from the request "
+            "alone, and never propose switching /model mid-session (the "
+            "prompt cache is per model: the whole conversation reloads "
+            "uncached).\n"
+            "[claude-token] Lean-output rules for this session: run tests "
             f"with quiet reporters{runners}; never dump raw API/HTML bodies — "
             "filter with `jq`/`grep` or pipe through `claude-token toon` "
             "(HTML: add `--keep script,css` when the user's analysis targets "
@@ -79,6 +87,8 @@ def cmd_posttool():
     """PostToolUse hook: when a tool result is huge, tell the model how to
     avoid the next one. Reactive but deterministic — it fires no matter what
     the model forgot, and works for any language or tool."""
+    if level() <= 0:
+        return
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, OSError):

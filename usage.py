@@ -114,11 +114,15 @@ def collect(days):
             if not dt or dt < cutoff:
                 continue
             t = b["on"] if in_on_period(dt, ps) else b["off"]
-            pi, po, pcr, pcw = price_for(model)
             inp, out = u.get("input_tokens", 0), u.get("output_tokens", 0)
             cr = u.get("cache_read_input_tokens", 0)
             cw = u.get("cache_creation_input_tokens", 0)
             t["turns"] += 1
             t["inp"] += inp; t["out"] += out; t["cr"] += cr; t["cw"] += cw
-            t["cost"] += (inp * pi + out * po + cr * pcr + cw * pcw) / 1e6
+            # Unpriced model: count the tokens, leave the cost out rather than
+            # bill it at some other model's rate (price_for warns separately).
+            p = price_for(model)
+            if p:
+                pi, po, pcr, pcw = p
+                t["cost"] += (inp * pi + out * po + cr * pcr + cw * pcw) / 1e6
     return b
