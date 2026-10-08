@@ -3,9 +3,9 @@ import glob
 import os
 from datetime import datetime, timedelta, timezone
 
-from common import (CLAUDE_DIR, HOME, PROJECTS, fmt_k, load_json, parse_ts,
-                    price_for, price_warnings)
-from usage import collect, iter_usage
+from common import (CLAUDE_DIR, HOME, PROJECTS, WRITE_1H, cache_writes, fmt_k,
+                    load_json, parse_ts, price_for, price_warnings)
+from usage import collect, session_usage
 
 
 def arg_days(argv, default):
@@ -30,40 +30,63 @@ def cmd_cache(argv):
     """Prompt-cache efficiency: hit rate, cold turns and the money they cost."""
     days = arg_days(argv, 7)
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    inp = cr = cw = turns = cold = 0
+    inp = cr = cw = cw_1h = turns = cold = 0
+    sub_turns = sub_cw = 0
     waste = 0.0
     for path in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
         if os.path.getmtime(path) < cutoff.timestamp():
             continue
-        for ts, model, u in iter_usage(path):
+        main, subs = session_usage(path)
+        # A subagent always starts cold — that is its entry fee, not a habit
+        # to fix — so it is counted apart from the session's own cold turns.
+        for ts, _model, u in subs:
+            dt = parse_ts(ts)
+            if dt and dt >= cutoff:
+                sub_turns += 1
+                sub_cw += u.get("cache_creation_input_tokens", 0)
+        for ts, model, u in main:
             dt = parse_ts(ts)
             if not dt or dt < cutoff:
                 continue
-            i, r, w = (u.get("input_tokens", 0),
-                       u.get("cache_read_input_tokens", 0),
-                       u.get("cache_creation_input_tokens", 0))
+            i, r = u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0)
+            w5, w1 = cache_writes(u)
+            w = w5 + w1
             turns += 1
-            inp += i; cr += r; cw += w
+            inp += i; cr += r; cw += w; cw_1h += w1
             if w > r:  # cold turn: rebuilt the cache instead of reusing it
                 cold += 1
-                p = price_for(model)
-                if p:
-                    waste += w * (p[3] - p[2]) / 1e6  # extra vs a warm cache read
+                p = price_for(model, i + r + w)
+                if p:  # extra vs reading the same tokens from a warm cache
+                    waste += (w5 * p[3] + w1 * p[0] * WRITE_1H - w * p[2]) / 1e6
 
     total_in = inp + cr + cw
     hit = cr / total_in * 100 if total_in else 0
+    # The TTL is whatever the sessions actually got, not a constant.
+    ttl = "1 h" if cw_1h * 2 >= cw else "5 min"
     print(f"\ncache • últimos {days} dias\n")
     print(f"entrada total   {fmt_k(total_in)} tok")
-    print(f"  reaproveitada {fmt_k(cr)} (taxa de acerto {hit:.0f}%, custa 10%)")
-    print(f"  regravada     {fmt_k(cw)} (custa 125%)")
+    print(f"  reaproveitada {fmt_k(cr)} (taxa de acerto {hit:.0f}%, custa 2,5-10% conforme o modelo)")
+    print(f"  regravada     {fmt_k(cw)} ({fmt_k(cw_1h)} com TTL de 1 h, a 200% da "
+          f"entrada; {fmt_k(cw - cw_1h)} de 5 min, a 125%)")
     print(f"turnos frios    {cold}/{turns} "
           f"(custo extra ~US$ {waste:,.2f} vs cache quente)")
+    if sub_turns:
+        print(f"subagentes      {fmt_k(sub_cw)} gravados em {sub_turns} respostas "
+              "(todo subagente parte sem cache)")
     show_price_warnings()
-    print("""
+    print(f"""
 Como manter o cache quente:
-  - responda/continue em menos de 5 min (TTL do cache)
+  - continue em menos de {ttl} (o TTL que suas sessões estão recebendo)
   - não edite CLAUDE.md/settings no meio da sessão (invalida o prefixo)
   - prefira continuar a sessão a abrir outra para o mesmo assunto
+
+Cache já esfriou? Não é motivo automático para /compact ou chat novo:
+  - o custo é UMA releitura do contexto, e o /compact paga a mesma releitura
+    para resumir — a statusline mostra o tamanho dela (cache🧊 reler N ≈$X)
+  - contexto pequeno: só continue
+  - contexto grande e ainda muitos turnos pela frente: /compact compensa,
+    porque cada turno seguinte relê menos
+  - assunto novo: /clear, com cache quente ou frio
 """)
 
 
@@ -74,7 +97,8 @@ def cmd_report(argv):
     unrelated stretch of past work is not a measurement of what it saved."""
     days = arg_days(argv, 30)
     b = collect(days)
-    t = {k: b["on"][k] + b["off"][k] for k in b["on"]}
+    sub = b["sub"]
+    t = {k: b["on"][k] + b["off"][k] + sub[k] for k in sub}
 
     print(f"\nclaude-token • últimos {days} dias • custos são ESTIMATIVAS\n")
     if not t["turns"]:
@@ -92,6 +116,17 @@ def cmd_report(argv):
     print(f"\nmédia por resposta: {t['out'] / t['turns']:,.0f} tok de saída · "
           f"{(t['inp'] + t['cr'] + t['cw']) / t['turns']:,.0f} tok lidos · "
           f"${t['cost'] / t['turns']:.4f}")
+    if sub["turns"]:
+        # Measured on both sides, so it is a fair pair: what a response costs
+        # in the main thread vs in a subagent. Not a claim about what the
+        # same work would have cost without delegating.
+        main_turns = t["turns"] - sub["turns"]
+        main_avg = (t["cost"] - sub["cost"]) / main_turns if main_turns else 0
+        print(f"\nsubagentes (já incluídos acima): {sub['turns']:,} respostas · "
+              f"{sub['inp'] + sub['cr'] + sub['cw']:,} tok lidos · "
+              f"US$ {sub['cost']:,.2f}"
+              f"\n  por resposta: ${sub['cost'] / sub['turns']:.4f} no subagente"
+              f" · ${main_avg:.4f} na conversa principal")
     show_price_warnings()
     print("\nEm plano de assinatura o dólar acima é referência: o limite que"
           "\naperta é a janela do plano, que a statusline mostra ao vivo.\n")
@@ -124,6 +159,9 @@ def cmd_tips():
 Hábitos que mais economizam:
   - prompt específico vence o vago: vago infla a SAÍDA (5x mais cara)
   - /clear ao trocar de assunto; /compact em conversa longa ainda útil
-  - turnos seguidos pagam 10% da entrada em cache; >5 min parado esfria
+  - turnos seguidos pagam 2,5-10% da entrada em cache (5% no Opus 5.5);
+    parado além do TTL (1 h ou 5 min — `claude-token cache` diz qual) esfria
+  - subagente em modelo menor barateia cada resposta, mas parte sem cache:
+    vale para tarefa isolada, não para uma pergunta rápida
   - peça o trecho, não o arquivo inteiro
 """)

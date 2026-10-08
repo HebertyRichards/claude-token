@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-from common import CONTEXT_WINDOW, GUARD_ENV, level
+from common import GUARD_ENV, level, window_for
 from lean import lean_note
 from memory import compact_pointer
 from rag import hook_hits as rag_hits
@@ -38,11 +38,11 @@ def is_simple_question(prompt, words):
     return p.endswith("?") or any(p.startswith(q) for q in QUESTION_STARTS)
 
 
-def context_pct(transcript):
+def context_pct(transcript, session_id):
     u = tail_usage(transcript or "") or {}
     ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
            + u.get("cache_creation_input_tokens", 0))
-    return ctx / CONTEXT_WINDOW * 100
+    return ctx / window_for(session_id) * 100
 
 
 def cmd_hook():
@@ -83,7 +83,7 @@ def cmd_hook():
         # Context pruning nudge: history is the silent token leak — every
         # response pays for it. Above 70% fill, stop rereads and surface
         # /compact.
-        pct = context_pct(data.get("transcript_path"))
+        pct = context_pct(data.get("transcript_path"), data.get("session_id"))
         if pct >= 70:
             notes.append(
                 f"[claude-token] Context {pct:.0f}% full: do not reread files "

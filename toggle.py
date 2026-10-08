@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 
-from common import (CLAUDE_DIR, DEFAULT_LEVEL, ENTRY, HOME, LEVELS, MARKER,
+from common import (CLAUDE_DIR, COMMAND, DEFAULT_LEVEL, ENTRY, HOME, LEVELS, MARKER,
                     SETTINGS, STATE, is_on, level, load_json, load_state,
                     now_iso, save_json, set_level)
 
@@ -30,8 +30,8 @@ def cmd_on():
         entries = hooks.setdefault(event, [])
         if not any(MARKER in json.dumps(h) for h in entries):
             entries.append(
-                {"hooks": [{"type": "command", "command": f"{ENTRY} {sub}"}]})
-    settings["statusLine"] = {"type": "command", "command": f"{ENTRY} statusline"}
+                {"hooks": [{"type": "command", "command": f"{COMMAND} {sub}"}]})
+    settings["statusLine"] = {"type": "command", "command": f"{COMMAND} statusline"}
     save_json(SETTINGS, settings)
 
     st = load_state()
@@ -127,6 +127,15 @@ def install_symlink():
     # Lets `claude-token on/off` work from any directory.
     bin_dir = os.path.join(HOME, ".local", "bin")
     link = os.path.join(bin_dir, "claude-token")
+    if os.name == "nt":
+        # Symlinks need admin on Windows; write shims instead (sh for the
+        # Git Bash that /token runs in, .cmd for cmd/PowerShell).
+        if os.path.isdir(bin_dir):
+            with open(link, "w", encoding="utf-8", newline="\n") as f:
+                f.write(f'#!/bin/sh\nexec {COMMAND} "$@"\n')
+            with open(link + ".cmd", "w", encoding="utf-8") as f:
+                f.write(f"@{COMMAND} %*\n")
+        return
     if os.path.isdir(bin_dir) and not os.path.exists(link):
         try:
             os.symlink(ENTRY, link)

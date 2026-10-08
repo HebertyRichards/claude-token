@@ -1,5 +1,5 @@
-"""Statusline: short lines (fit narrow terminals) — context fill, session
-totals, and ONE clear money comparison against the no-ECO baseline."""
+"""Statusline: short lines (fit narrow terminals) — context fill, cache
+state, the plan window and the session's measured totals."""
 import json
 import os
 import sys
@@ -7,9 +7,10 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 
-from common import (CLAUDE_DIR, CONTEXT_WINDOW, fmt_k, level, load_json,
-                    load_state, parse_ts, price_for, save_json)
-from usage import segment_usage
+from common import (CLAUDE_DIR, CONTEXT_WINDOW, TTL_1H, WRITE_1H, cache_ttl,
+                    fmt_k, level, load_json, load_state, parse_ts, price_for,
+                    remember_window, save_json, turn_cost)
+from usage import segment_usage, subagent_usage
 
 
 WEEKDAYS = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
@@ -104,17 +105,36 @@ def cmd_statusline():
     u = entries[-1][2] if entries else {}
     ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
            + u.get("cache_creation_input_tokens", 0)) or carried
-    pct = ctx / CONTEXT_WINDOW * 100
-    dot = "🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
-    # Warm cache = last turn mostly reused cached input (10% of the price);
-    # cold = it re-wrote the cache (idle >5min, fresh session or post-compact).
+    # The window is per model and plan (200k or 1M); the harness says which.
+    window = (data.get("context_window") or {}).get("context_window_size")
+    if isinstance(window, int) and window > 0:
+        remember_window(data.get("session_id"), window)
+    else:
+        window = CONTEXT_WINDOW
+    pct = ctx / window * 100
+    dot ="🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
+    # Warm cache = last turn mostly reused cached input (2.5-10% of the price);
+    # cold = it re-wrote the cache (idle past the TTL, fresh session or
+    # post-compact).
     warm = u.get("cache_read_input_tokens", 0) > u.get("cache_creation_input_tokens", 0)
-    # The cache TTL is 5 min: past it, the next turn rewrites the cache no
-    # matter how warm the last one was — flip to cold by wall clock.
+    # Past the TTL the next turn rewrites the cache no matter how warm the
+    # last one was — flip to cold by wall clock. The TTL is the one this
+    # session is actually getting (1h or 5min), read from its own writes.
     last = parse_ts(entries[-1][0]) if entries else None
-    if last and (datetime.now(timezone.utc) - last).total_seconds() > 300:
+    ttl = cache_ttl([e[2] for e in entries])
+    expired = bool(last) and (datetime.now(timezone.utc) - last).total_seconds() > ttl
+    if expired:
         warm = False
     cache = "cache🔥" if warm else "cache🧊"
+    if expired and ctx:
+        # What the expiry costs is one re-read of the context, and it is paid
+        # by a /compact just the same. Show the size of it instead of advising:
+        # at a small context a cold turn is not worth reorganizing a session.
+        cache += f" reler {fmt_k(ctx)}"
+        p = price_for(entries[-1][1], ctx)
+        if p:
+            write = p[0] * WRITE_1H if ttl == TTL_1H else p[3]
+            cache += f" ≈${ctx * write / 1e6:.2f}"
 
     st = load_state()
     ps = st.get("periods", [])
@@ -131,25 +151,42 @@ def cmd_statusline():
     cost = 0.0
     for _ts, mdl, usage in entries:
         turns += 1
-        inp = usage.get("input_tokens", 0)
-        out = usage.get("output_tokens", 0)
-        cr = usage.get("cache_read_input_tokens", 0)
-        cw = usage.get("cache_creation_input_tokens", 0)
-        out_tok += out
-        read_tok += inp + cr + cw
-        p = price_for(mdl)
-        if p:
-            pi, po, pcr, pcw = p
-            cost += (inp * pi + out * po + cr * pcr + cw * pcw) / 1e6
-        else:
+        out_tok += usage.get("output_tokens", 0)
+        read_tok += (usage.get("input_tokens", 0)
+                     + usage.get("cache_read_input_tokens", 0)
+                     + usage.get("cache_creation_input_tokens", 0))
+        c = turn_cost(mdl, usage)
+        if c is None:
             unpriced += 1
+        else:
+            cost += c
 
-    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{CONTEXT_WINDOW//1000}k ({pct:.0f}%) {dot} | {cache}")
+    # Subagents spawned in this segment: billed to the same plan window, but
+    # their turns never enter this transcript — shown apart, never mixed into
+    # the session's own numbers.
+    since = entries[0][0] if entries else ""
+    agents = 0
+    sub_cost = 0.0
+    for agent in subagent_usage(transcript) if transcript else []:
+        mine = [e for e in agent if e[0] >= since]
+        if not mine:
+            continue
+        agents += 1
+        for _ts, mdl, usage in mine:
+            c = turn_cost(mdl, usage)
+            if c is None:
+                unpriced += 1
+            else:
+                sub_cost += c
+
+    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{fmt_k(window)} ({pct:.0f}%) {dot} | {cache}")
     # The plan window is the headline: on a subscription it, not the dollar
     # estimate, is what actually runs out.
     usage = plan_usage_line(data.get("rate_limits") or {})
     if usage:
         print(usage)
-    tail = f" · {unpriced} turno(s) sem preço" if unpriced else ""
+    tail = f" · {agents} subagente(s) ~${sub_cost:.2f}" if agents else ""
+    if unpriced:
+        tail += f" · {unpriced} turno(s) sem preço"
     print(f"sessão ({turns} resp): leitura {fmt_k(read_tok)} · saída "
           f"{fmt_k(out_tok)} · custo ~${cost:.2f}{tail}")

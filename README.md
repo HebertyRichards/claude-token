@@ -22,9 +22,13 @@ the model forgot.
 **Compact memory** — `/compact` empties the model's context, not the
 transcript: the discarded turns stay on disk in the same `.jsonl`. So after a
 compact the hook injects a ~50-token pointer saying what was recovered — your
-requests verbatim, files edited, commits, tests, and the **uncommitted** git
-state — and asks you whether to load the full note. Rebuilt mechanically: no
-model call, nothing summarized, nothing rewritten.
+requests verbatim, the decisions you made when asked to choose, the head of
+the final reply each request got (the why), files edited, commits, tests, and
+the **uncommitted** git state — and asks you whether to load the full note.
+Rebuilt mechanically: no model call, nothing summarized, nothing rewritten —
+replies are quoted and cut at 400 chars, never rephrased. The note's labels
+are in English (its reader is the model); what it quotes stays in your
+language.
 
 **RAG (BM25) search** — `index` builds a local lexical index of the project
 (40-line chunks, camelCase/snake_case aware). With an index present, each
@@ -70,16 +74,32 @@ uso do plano: 5h 34% 🟢 · semana 12% 🟢
 sessão (48 resp): leitura 543.8k · saída 11.5k · custo ~$0.86
 ```
 
-- `ctx` — context fill; 🟢 <60%, 🟡 <85%, 🔴 above.
+- `ctx` — context fill against the window the harness reports for the session
+  (200k or 1M; 200k only as a fallback); 🟢 <60%, 🟡 <85%, 🔴 above. The
+  "context full, consider /compact" nudge uses the same window.
 - `cache🔥/🧊` — whether the prompt cache is being reused (cached input costs
-  10%). Flips to 🧊 after 5 min idle (the cache TTL) or right after a compact.
+  2.5-10% of the input price, depending on the model). Flips to 🧊 once the
+  session has been idle past its cache TTL, or right after a compact. The TTL
+  is read from the session's own cache writes — 1 hour on a subscription, 5
+  minutes otherwise — never assumed.
+- `cache🧊 reler 135.2k ≈$1.08` — when the cache has expired, what the next
+  turn will re-read and roughly cost. That is the whole price of the expiry,
+  and a `/compact` pays the same re-read to summarize, so an expired cache is
+  not by itself a reason to compact or start over: it depends on that number
+  and on how many turns are still ahead.
+- `· 1 subagente(s) ~$0.04` — what the subagents spawned since the last
+  compact cost. Their turns live in `<session>/subagents/`, not in the
+  transcript, so they are shown apart from the session's own totals.
 - On a subscription the **plan window**, not the dollar figure, is what
   actually runs out — so it gets the headline line when the harness reports it.
 - `/compact` resets the session counters (they count only what came after the
   last compact boundary). `/clear` starts a fresh transcript.
 
-**Reports** — `report` gives straight totals from the transcripts. `cache`
-shows prompt cache hit rate, cold turns and what they cost extra. `tips`
+**Reports** — `report` gives straight totals from the transcripts, subagents
+included, with the measured cost per response in a subagent next to the main
+thread's. `cache` shows prompt cache hit rate, cold turns and what they cost
+extra, how much was written at the 1-hour vs the 5-minute rate, and what
+subagents wrote on startup (each one begins with no cache). `tips`
 audits config waste: oversized `CLAUDE.md` files, MCP servers inflating every
 session.
 
@@ -169,6 +189,7 @@ claude-token-prices.json   the price table — yours to edit
 claude-token-rag/          one BM25 index per project
 claude-token-memory/       one note per compacted session (0600, holds your text)
 claude-token-sessions.json which sessions already got the lean rules
+claude-token-window.json   context window per session, as the statusline saw it
 commands/token.md          the /token slash command
 settings.json.bak-claude-token   backup taken on first `on`
 ```
