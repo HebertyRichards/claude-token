@@ -22,10 +22,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 # Windows pipes default to cp1252, which can't encode the statusline emoji and
-# mangles accented prompts; Claude Code speaks UTF-8 on both ends.
-for _s in (sys.stdin, sys.stdout, sys.stderr):
+# mangles accented prompts; Claude Code speaks UTF-8 on both ends. Text mode
+# there also writes "\r\n": pin "\n" so the statusline and the notes the hook
+# hands the model are byte-for-byte what Linux emits.
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
-        _s.reconfigure(encoding="utf-8", errors="replace")
+        _s.reconfigure(encoding="utf-8", errors="replace", newline="\n")
 
 from hook import cmd_hook
 from lean import cmd_posttool

@@ -95,7 +95,7 @@ def cmd_hook():
             notes.append(
                 "[claude-token] Simple question: answer briefly and directly, "
                 "no tools unless needed. If the session is questions-only, "
-                "mention that /model haiku is ~5x cheaper.")
+                "mention that /model haiku is several times cheaper.")
             print("\n".join(notes))
             return
 

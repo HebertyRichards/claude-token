@@ -4,12 +4,11 @@ import json
 import os
 import sys
 import time
-import urllib.request
 from datetime import datetime, timezone
 
 from common import (CLAUDE_DIR, CONTEXT_WINDOW, TTL_1H, WRITE_1H, cache_ttl,
-                    fmt_k, level, load_json, load_state, parse_ts, price_for,
-                    remember_window, save_json, turn_cost)
+                    fetch_plan_usage, fmt_k, level, load_json, load_state,
+                    parse_ts, price_for, remember_window, save_json, turn_cost)
 from usage import segment_usage, subagent_usage
 
 
@@ -20,6 +19,14 @@ USAGE_TTL = 120  # segundos entre consultas ao endpoint (statusline roda direto)
 
 def _dot(pct):
     return "🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
+
+
+def _fmt_window(n):
+    """200000 -> 200k, 1000000 -> 1M: a window is a round number, so it reads
+    as one (fmt_k would print 200.0k and 1.0M)."""
+    if n >= 1_000_000 and n % 1_000_000 == 0:
+        return f"{n // 1_000_000}M"
+    return f"{n // 1000}k" if n % 1000 == 0 else fmt_k(n)
 
 
 def _fmt_reset(dt, with_day):
@@ -37,26 +44,16 @@ def scoped_weekly():
     entries = cache.get("entries", [])
     if time.time() - cache.get("fetched_at", 0) < USAGE_TTL:
         return entries
-    try:
-        creds = load_json(os.path.join(CLAUDE_DIR, ".credentials.json"), {})
-        token = (creds.get("claudeAiOauth") or {}).get("accessToken")
-        if token:
-            req = urllib.request.Request(
-                "https://api.anthropic.com/api/oauth/usage",
-                headers={"Authorization": f"Bearer {token}",
-                         "anthropic-beta": "oauth-2025-04-20"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.load(resp)
-            entries = [
-                {"label": model.lower(), "percent": lim.get("percent", 0),
-                 "resets_at": lim.get("resets_at")}
-                for lim in data.get("limits") or []
-                if lim.get("kind") == "weekly_scoped"
-                and (model := ((lim.get("scope") or {}).get("model") or {})
-                     .get("display_name"))
-            ]
-    except Exception:
-        pass  # sem rede/token expirado: segue com o cache antigo
+    data = fetch_plan_usage()
+    if data is not None:  # sem rede/token expirado: segue com o cache antigo
+        entries = [
+            {"label": model.lower(), "percent": lim.get("percent", 0),
+             "resets_at": lim.get("resets_at")}
+            for lim in data.get("limits") or []
+            if isinstance(lim, dict) and lim.get("kind") == "weekly_scoped"
+            and (model := ((lim.get("scope") or {}).get("model") or {})
+                 .get("display_name"))
+        ]
     try:
         # fetched_at avança mesmo em falha para não repetir o timeout a cada refresh.
         save_json(USAGE_CACHE, {"fetched_at": time.time(), "entries": entries})
@@ -179,7 +176,7 @@ def cmd_statusline():
             else:
                 sub_cost += c
 
-    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{fmt_k(window)} ({pct:.0f}%) {dot} | {cache}")
+    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{_fmt_window(window)} ({pct:.0f}%) {dot} | {cache}")
     # The plan window is the headline: on a subscription it, not the dollar
     # estimate, is what actually runs out.
     usage = plan_usage_line(data.get("rate_limits") or {})

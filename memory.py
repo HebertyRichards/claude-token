@@ -13,11 +13,10 @@ import sys
 import time
 
 from common import CLAUDE_DIR, PROJECTS, load_json, save_json
-from lean import TEST_RUNNERS
+from lean import EDIT_TOOLS, TEST_RUNNERS
 
 MEM_DIR = os.path.join(CLAUDE_DIR, "claude-token-memory")
 SEEN = os.path.join(MEM_DIR, "_seen.json")
-EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 MAX_PROMPT = 2000     # chars kept per user request — a guard against pasted
                       # logs, not a summary: decisions listed in a prompt fit
 MAX_REPLY = 400       # chars kept of the assistant's final reply per request
@@ -279,7 +278,9 @@ def compact_pointer(transcript, session_id):
 
 def latest_transcript(cwd):
     """The most recently touched transcript for this project."""
-    guess = os.path.join(PROJECTS, cwd.replace("/", "-").replace(".", "-"))
+    # Claude Code names the folder after the path with every non-alphanumeric
+    # turned into "-": "/" and "." on POSIX, also ":" and "\" on Windows.
+    guess = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd))
     files = glob.glob(os.path.join(guess, "*.jsonl"))
     if not files:
         files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))

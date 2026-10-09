@@ -74,17 +74,60 @@ TTL_5M, TTL_1H = 300, 3600
 _unknown = set()   # model ids seen with no price entry
 
 
+_prices = None     # per-process cache: every caller is a short-lived command
+
+
 def load_prices():
-    """Price table from PRICES_FILE, seeded on first use."""
+    """Price table from PRICES_FILE: seeded on first use, and topped up with
+    any row the seed has gained since.
+
+    Without the top-up a new model keeps matching an older, more generic row
+    on every install that predates it — "claude-opus-5-5" billed by "opus",
+    at Opus 5 rates — because the file used to be written exactly once. Rows
+    already in the file are the user's and are never overwritten;
+    price_warnings() reports the ones that disagree with a newer seed."""
+    global _prices
+    if _prices is not None:
+        return _prices
     data = load_json(PRICES_FILE, None)
-    if not isinstance(data, dict) or not data.get("prices"):
+    if (not isinstance(data, dict) or not isinstance(data.get("prices"), dict)
+            or not data["prices"]):
         data = {"_notes": SEED_NOTES, "_checked": SEED_CHECKED,
                 "prices": {k: list(v) for k, v in SEED_PRICES.items()}}
+        changed = True
+    else:
+        missing = [k for k in SEED_PRICES if k not in data["prices"]]
+        for k in missing:
+            data["prices"][k] = list(SEED_PRICES[k])
+        changed = bool(missing)
+        if missing:
+            data["_notes"] = SEED_NOTES
+            # Every seed row is now in the file exactly as the seed has it:
+            # the table is as verified as the seed. An edited row keeps the
+            # file's older date, so it stays reported.
+            if not seed_diffs(data) and (data.get("_checked") or "") < SEED_CHECKED:
+                data["_checked"] = SEED_CHECKED
+    if changed:
         try:
             save_json(PRICES_FILE, data)
         except OSError:
             pass
+    _prices = data
     return data
+
+
+def seed_diffs(data):
+    """Seed rows whose value in the file differs: [(key, in file, in seed)]."""
+    out = []
+    for key, seed in SEED_PRICES.items():
+        row = (data.get("prices") or {}).get(key)
+        try:
+            same = [float(x) for x in row] == [float(x) for x in seed]
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            out.append((key, row, list(seed)))
+    return out
 
 
 def price_for(model, prompt_tokens=0):
@@ -119,6 +162,10 @@ def cache_writes(u):
 
 def turn_cost(model, u):
     """Estimated USD of one response, or None when the model is unpriced."""
+    if model == "<synthetic>":
+        # A turn the harness wrote itself (an interrupted request): no model
+        # ran, so it costs nothing — and is not a model missing from the table.
+        return 0.0
     inp, cr = u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0)
     w5, w1 = cache_writes(u)
     p = price_for(model, inp + cr + w5 + w1)
@@ -137,6 +184,31 @@ def cache_ttl(usages):
         if w5 or w1:
             return TTL_1H if w1 >= w5 else TTL_5M
     return TTL_5M
+
+
+def fetch_plan_usage(timeout=3):
+    """The account's plan windows (5h, week, per-model), from the endpoint
+    /usage itself reads — or None: no subscription login, offline, expired
+    token. The statusline's stdin carries the two main windows, but only
+    inside a live session; this is the one source that works outside one."""
+    creds = load_json(os.path.join(CLAUDE_DIR, ".credentials.json"), {})
+    token = ((creds.get("claudeAiOauth") or {}).get("accessToken")
+             if isinstance(creds, dict) else None)
+    if not token:
+        return None
+    # Imported here: the hook loads this module on every prompt and never
+    # needs the network stack.
+    import urllib.request
+    req = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={"Authorization": f"Bearer {token}",
+                 "anthropic-beta": "oauth-2025-04-20"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.load(resp)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def remember_window(session_id, size):
@@ -164,7 +236,15 @@ def window_for(session_id):
 def price_warnings():
     """Lines to show the user about price-table trust. Empty when all is well."""
     out = []
-    checked = parse_ts((load_prices().get("_checked") or "") + "T00:00:00+00:00")
+    data = load_prices()
+    checked = parse_ts((data.get("_checked") or "") + "T00:00:00+00:00")
+    # The repo verified its table after this file was last checked: a row that
+    # disagrees is either a deliberate edit or a price that changed since.
+    if (data.get("_checked") or "") < SEED_CHECKED:
+        for key, row, seed in seed_diffs(data):
+            out.append(f"[!] preço de '{key}' difere da tabela do repo, conferida "
+                       f"em {SEED_CHECKED} (arquivo {row}, repo {seed}) — ajuste "
+                       f"em {PRICES_FILE}, ou atualize _checked se for intencional")
     if checked is None:
         out.append(f"[!] {PRICES_FILE}: _checked ausente — custos não verificados")
     else:
@@ -236,9 +316,19 @@ LEVELS = {
     2: "normal — + RAG e aviso de contexto cheio (padrão)",
 }
 DEFAULT_LEVEL = 2
+# Per-process override of the saved level: `CLAUDE_TOKEN_LEVEL=0 claude` runs
+# one session with nothing injected, without touching settings or the state
+# other sessions read. The benchmark's two arms are told apart this way.
+LEVEL_ENV = "CLAUDE_TOKEN_LEVEL"
 
 
 def level():
+    try:
+        forced = int(os.environ.get(LEVEL_ENV, ""))
+        if forced in LEVELS:
+            return forced
+    except ValueError:
+        pass
     try:
         n = int(load_state().get("level", DEFAULT_LEVEL))
     except (TypeError, ValueError):

@@ -39,7 +39,11 @@ def tokenize(text):
 
 
 def index_path(root):
-    h = hashlib.sha1(os.path.abspath(root).encode()).hexdigest()[:16]
+    # normcase: a no-op on POSIX. On Windows the same folder arrives as
+    # C:\Users\x\Documentos or c:/users/x/documentos depending on who reports
+    # it, and a case-sensitive hash would never find the index again.
+    key = os.path.normcase(os.path.abspath(root))
+    h = hashlib.sha1(key.encode()).hexdigest()[:16]
     return os.path.join(RAG_DIR, h + ".json")
 
 
@@ -79,7 +83,9 @@ def cmd_index(argv):
             except OSError:
                 continue
             files += 1
-            rel = os.path.relpath(full, root)
+            # "/" everywhere: the pointer handed to the model reads the same on
+            # Windows as on Linux, and "/" is a valid separator on both.
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
             for start in range(0, max(len(lines), 1), STEP):
                 block = lines[start:start + CHUNK]
                 if not any(l.strip() for l in block):

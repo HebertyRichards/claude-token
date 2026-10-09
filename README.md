@@ -69,9 +69,9 @@ but cannot rewrite what you already pasted.
 **Statusline** — live in the terminal, short lines that fit small screens:
 
 ```
-ECO✅ nv2 (/token level N) | Opus 5 | ctx 54.1k/200k (27%) 🟢 | cache🔥
-uso do plano: 5h 34% 🟢 · semana 12% 🟢
-sessão (48 resp): leitura 543.8k · saída 11.5k · custo ~$0.86
+ECO✅ nv2 (/token level N) | Opus 5.5 | ctx 150.6k/1M (15%) 🟢 | cache🔥
+uso do plano: 5h 39% 🟢 (reseta 02:20) · semana 14% 🟢 (reseta seg 18:00)
+sessão (36 resp): leitura 3.4M · saída 58.8k · custo ~$2.77 · 1 subagente(s) ~$0.04
 ```
 
 - `ctx` — context fill against the window the harness reports for the session
@@ -114,7 +114,8 @@ injection only, ~150-350 tokens per session.
 2  normal  + RAG and the context-full warning        (default)
 ```
 
-`claude-token level N`, or `/token level N`.
+`claude-token level N`, or `/token level N`. To run a single session at
+another level without changing the saved one: `CLAUDE_TOKEN_LEVEL=0 claude`.
 
 There used to be a level 3 that had Haiku rewrite every prompt into English.
 It was removed: measured over 135 runs it cost **~17.7k input tokens per
@@ -127,12 +128,17 @@ exactly as you wrote it.
 This tool refuses to flatter itself, because a savings number you can't trust
 is worse than none:
 
-- **No ON-vs-OFF comparison.** The optimizer is meant to stay on, so there is
-  no matched off-period to compare against. A per-turn average taken from an
-  unrelated stretch of past work is not a measurement of what it saved.
+- **No ON-vs-OFF comparison in the reports.** Day-to-day usage has no matched
+  off-period, and a per-turn average taken from an unrelated stretch of past
+  work is not a measurement of what was saved. The comparison lives in
+  [`benchmark/`](benchmark/README.md), where it can be controlled: the same
+  task, run with the optimizer off and on.
 - **Prices are not hardcoded.** They live in `~/.claude/claude-token-prices.json`
   for you to edit, with the date you last verified them; after 90 days the
-  reports say so. There is no pricing endpoint to fetch them from.
+  reports say so. There is no pricing endpoint to fetch them from. Rows the
+  repo gains later (a new model) are added to your file on the next run; rows
+  you already have are never overwritten — when one disagrees with a table the
+  repo verified more recently, the reports name it.
 - **An unpriced model is reported, never guessed.** Its tokens are counted and
   its cost is left out, with a warning naming the model — rather than billing
   it silently at some other model's rate.
@@ -141,6 +147,29 @@ is worse than none:
   a percentage against zip bytes it was never comparable to.
 - Costs are ESTIMATES from transcript usage and public per-MTok prices. Your
   bill and your plan window are the source of truth.
+
+## Benchmark
+
+`benchmark/` answers "does it actually save anything?" with a run instead of
+a claim. You describe a task — a bug to fix, a feature to add, code to analyse
+— and point at your own project; it is executed headless with the optimizer
+off and on, on the model you pick, and the two are compared over the runs that
+completed the task. There are no bundled scenarios: the number is about your
+work, not a toy project's.
+
+```bash
+python benchmark/run.py --prompt "Os testes de pagamento estão falhando. Corrija sem alterar os testes." \
+    --workspace ~/projetos/minha-api --kind bugfix --check "pytest -q" --model haiku --reps 3
+python benchmark/run.py --resume           # continue after a stop
+```
+
+Every run works on a throwaway copy of the project and is fenced in: no git
+(no branch, commit, push or merge), no credentials (`.env`, keys), no MCP
+connectors, no writes outside the copy.
+
+It spends real tokens, so it stops before crossing 80% of the 5-hour window or
+85% of the weekly one, writes its results file after every run, and resumes
+from it. Details, scenario format and caveats: [benchmark/README.md](benchmark/README.md).
 
 ## Requirements
 

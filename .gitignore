@@ -13,3 +13,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# Benchmark output: results and the transcripts filed with them
+benchmark/results/

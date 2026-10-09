@@ -10,6 +10,7 @@ from common import CLAUDE_DIR, level, load_json, save_json
 
 SESSIONS = os.path.join(CLAUDE_DIR, "claude-token-sessions.json")
 BIG_RESULT = 20_000   # chars (~5k tokens): a tool result this big gets flagged
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 TEST_RUNNERS = ("pytest", "vitest", "jest", "playwright", "cypress", "mocha",
                 "go test", "cargo test", "phpunit", "rspec", "npm test",
                 "dotnet test", "mvn ", "gradle")
@@ -92,6 +93,11 @@ def cmd_posttool():
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, OSError):
+        return
+    # An edit hands the harness the whole file (before, after, patch), but the
+    # model only gets a one-line confirmation: the payload size says nothing
+    # about what entered the context, and flagging it is a false alarm.
+    if data.get("tool_name") in EDIT_TOOLS:
         return
     ti = data.get("tool_input") or {}
     if not isinstance(ti, dict):
