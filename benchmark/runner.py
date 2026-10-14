@@ -12,18 +12,23 @@ import shutil
 import subprocess
 import time
 
-from common import LEVEL_ENV, PROJECTS, cache_writes, turn_cost
-from usage import session_usage
+from common import (LEVEL_ENV, PROJECTS, cache_writes, price_row, same_version,
+                    turn_cost)
+from scenario import forbidden, is_secret
+from usage import session_usage, subagent_files
 
 MARKER = "[claude-token]"
 WORKSPACE_PREFIX = "ctbench-"
+FAMILIES = ("opus", "sonnet", "haiku", "fable", "mythos")
+SUBAGENT_ENV = "CLAUDE_CODE_SUBAGENT_MODEL"   # the CLI's own switch
+FILE_TOOLS = ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit")
 # What the CLI says when the account, not the task, is what failed.
 LIMIT_RE = re.compile(
     r"usage limit|rate.?limit|limit reached|hit your limit|out of (extra )?usage"
     r"|credit balance|quota|\b429\b|overloaded", re.I)
 
 
-def command(claude, model, session_id, tools, denied, run_budget=0, effort=""):
+def command(claude, model, session_id, tools, denied, run_budget=0, effort="", note=""):
     cmd = list(claude) + ["-p", "--output-format", "json", "--model", model,
                           "--session-id", session_id,
                           "--permission-mode", "acceptEdits",
@@ -35,6 +40,8 @@ def command(claude, model, session_id, tools, denied, run_budget=0, effort=""):
         cmd += ["--max-budget-usd", f"{run_budget:g}"]
     if effort:
         cmd += ["--effort", effort]
+    if note:
+        cmd += ["--append-system-prompt", note]
     # Variadic options, so they go last; the prompt travels on stdin.
     cmd += ["--disallowedTools", *denied]
     if tools:
@@ -70,13 +77,17 @@ def guard_env(env, root):
     return env
 
 
-def arm_env(arm, level, root):
+def arm_env(arm, level, root, subagent_model=""):
     """The run's environment. The only thing that differs between the arms is
     the level the hooks see: at 0 they run and inject nothing — exactly what
     `claude-token level 0` does — so settings.json is never touched and no
-    other session notices. Both arms get the same guards."""
+    other session notices. Both arms get the same guards, and the same model
+    for subagents when one was asked for (by default they inherit the main
+    thread's)."""
     env = guard_env(dict(os.environ), root)
     env[LEVEL_ENV] = "0" if arm == "off" else str(level)
+    if subagent_model:
+        env[SUBAGENT_ENV] = subagent_model
     return env
 
 
@@ -128,14 +139,20 @@ def parse_result(stdout):
     return None
 
 
-def classify(exit_code, timed_out, result, stdout, stderr):
+def classify(exit_code, timed_out, result, stdout, stderr, plan_capped=False):
     """("", "") when the CLI finished the turn; else (status, reason) with
-    status "limit" (the account ran out: stop the benchmark) or "error"."""
+    status "limit" (the account ran out, or the plan's ceiling left no room to
+    finish: stop the benchmark and resume later) or "error"."""
     failed = (timed_out or exit_code != 0 or result is None
               or bool(result.get("is_error")))
     if not failed:
         return "", ""
     said = str((result or {}).get("result") or "")
+    if "budget" in str((result or {}).get("subtype") or "").lower():
+        if plan_capped:
+            return "limit", ("a execução foi cortada para não passar do teto do "
+                             "plano; ela será refeita na retomada")
+        return "error", "a execução passou do --run-budget e foi cortada"
     blob = " ".join((said, stderr[-2000:], "" if result else stdout[-2000:]))
     if LIMIT_RE.search(blob):
         return "limit", " ".join(blob.split())[:300]
@@ -176,12 +193,15 @@ def count_markers(path):
 
 
 def measure(path):
-    """Everything a run spent, main thread and subagents, from its transcript."""
+    """Everything a run spent, main thread and subagents, from its transcript.
+    Each response is priced by the model that produced it: a subagent on
+    another model than the main thread is billed at its own rate."""
     main, subs = session_usage(path)
     tot = dict(source="transcript", turns=0, sub_turns=0, inp=0, out=0, cr=0,
-               cw_5m=0, cw_1h=0, cost=0.0, unpriced=0)
-    models = []
+               cw_5m=0, cw_1h=0, cost=0.0, sub_cost=0.0, unpriced=0)
+    models, sub_models = [], []
     for is_sub, entries in ((False, main), (True, subs)):
+        seen = sub_models if is_sub else models
         for _ts, model, u in entries:
             if model == "<synthetic>":
                 continue
@@ -197,14 +217,122 @@ def measure(path):
                 tot["unpriced"] += 1
             else:
                 tot["cost"] += cost
-            if model not in models:
-                models.append(model)
+                tot["sub_cost"] += cost if is_sub else 0.0
+            if model not in seen:
+                seen.append(model)
     tot["tokens"] = tot["inp"] + tot["out"] + tot["cr"] + tot["cw_5m"] + tot["cw_1h"]
-    tot["cost"] = round(tot["cost"], 6)
-    tot["models"] = models
+    tot["cost"], tot["sub_cost"] = round(tot["cost"], 6), round(tot["sub_cost"], 6)
+    tot["models"], tot["sub_models"] = models, sub_models
+    tot["price_rows"] = {m: price_row(m) for m in models + sub_models}
     tot["markers"] = count_markers(path)
     tot["transcript"] = path
     return tot
+
+
+def ran_as_requested(requested, models):
+    """Did the main thread run the model that was asked for? An alias (opus,
+    sonnet, haiku…) accepts whatever version it resolves to; a full id must
+    be that exact version — "claude-opus-5" is not answered by Opus 5.5.
+    Other aliases (default, opusplan…) cannot be checked and pass."""
+    want = requested.lower().split("[")[0]
+    if not models:
+        return True
+    if want in FAMILIES:
+        return all(want in m.lower() for m in models)
+    if not want.startswith("claude-"):
+        return True
+    return all(same_version(m, want) for m in models)
+
+
+def _tool_calls(path):
+    """[name, input, failed] for every tool call in one transcript file;
+    `failed` is None when the call never got a result."""
+    calls, order = {}, []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"tool_use"' not in line and '"tool_result"' not in line:
+                    continue
+                try:
+                    content = (json.loads(line).get("message") or {}).get("content")
+                except ValueError:
+                    continue
+                for block in content if isinstance(content, list) else []:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use" and block.get("id") not in calls:
+                        calls[block.get("id")] = [block.get("name"),
+                                                  block.get("input") or {}, None]
+                        order.append(block.get("id"))
+                    elif (block.get("type") == "tool_result"
+                          and block.get("tool_use_id") in calls):
+                        calls[block["tool_use_id"]][2] = bool(block.get("is_error"))
+    except OSError:
+        pass
+    return [calls[i] for i in order]
+
+
+def replay_edits(path, old_root, new_root):
+    """Rebuild what a run changed from its own Edit and Write calls, for a run
+    recorded before its changes were saved. Returns the files touched. Changes
+    made through the shell are not in those calls and are not rebuilt."""
+    def inside(file_path):
+        full = os.path.normcase(os.path.abspath(file_path))
+        base = os.path.normcase(os.path.abspath(old_root))
+        return os.path.relpath(full, base) if full.startswith(base + os.sep) else None
+
+    touched = []
+    for name, inp, failed in _tool_calls(path):
+        if failed is not False or name not in ("Edit", "Write", "MultiEdit"):
+            continue
+        rel = inside(str(inp.get("file_path") or ""))
+        if rel is None:
+            continue
+        target = os.path.join(new_root, rel)
+        if name == "Write":
+            text = str(inp.get("content") or "")
+        else:
+            with open(target, encoding="utf-8") as f:
+                text = f.read()
+            for edit in (inp.get("edits") if name == "MultiEdit" else [inp]) or []:
+                old, new = str(edit.get("old_string") or ""), str(edit.get("new_string") or "")
+                if old not in text:
+                    raise ValueError(f"{rel}: um Edit do transcript não casa mais "
+                                     "com o arquivo — o projeto mudou desde a execução")
+                text = text.replace(old, new) if edit.get("replace_all") else text.replace(old, new, 1)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        if rel not in touched:
+            touched.append(rel.replace(os.sep, "/"))
+    return touched
+
+
+def audit(path):
+    """What the run actually did with its tools, main thread and subagents:
+    how many shell commands ran, and any that went THROUGH although the fences
+    forbid it. A refused call is the fence working; one that ran is the
+    benchmark's own failure, and that run is thrown out."""
+    out = {"commands": 0, "sub_commands": 0, "violations": []}
+    for file, is_sub in [(path, False)] + [(p, True) for p in subagent_files(path)]:
+        for name, inp, failed in _tool_calls(file):
+            if not isinstance(inp, dict):
+                continue
+            if name in ("Bash", "PowerShell"):
+                what = str(inp.get("command") or "")
+                why = forbidden(what)
+                if failed is not None:
+                    out["sub_commands" if is_sub else "commands"] += 1
+            elif name in FILE_TOOLS:
+                target = str(inp.get("file_path") or inp.get("notebook_path") or "")
+                why = "credenciais" if is_secret(os.path.basename(target)) else ""
+                what = f"{name} {target}"
+            else:
+                continue
+            if why and failed is False:
+                out["violations"].append(("subagente — " if is_sub else "")
+                                         + f"{why}: {' '.join(what.split())[:140]}")
+    return out
 
 
 def usage_from_cli(result):

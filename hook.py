@@ -68,7 +68,8 @@ def cmd_hook():
     cwd = data.get("cwd") or os.getcwd()
     # Level 1+: lean-output rules, once per session, scoped to this project's
     # stack (only the test runners it actually uses — never a generic list).
-    rules = lean_note(cwd, data.get("session_id"))
+    building = any(verb in prompt.lower() for verb in BUILD_VERBS)
+    rules = lean_note(cwd, data.get("session_id"), building)
     if rules:
         notes.append(rules)
 
@@ -104,8 +105,9 @@ def cmd_hook():
         hits = rag_hits(cwd, prompt)
         if hits:
             notes.append(
-                "[claude-token] RAG — likely relevant spots (Read only these "
-                "ranges with offset/limit instead of whole files): "
+                "[claude-token] RAG — likely relevant spots, code before docs "
+                "(Read only these ranges with offset/limit instead of whole "
+                "files): "
                 + " · ".join(hits))
 
     if notes:

@@ -1,6 +1,7 @@
 """Shared constants, pricing, JSON/state helpers and formatting."""
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -30,26 +31,41 @@ STALE_DAYS = 90  # after this, the price table is reported as unverified
 # cache_write is the 5-minute-TTL rate (1.25x input). A 1-hour-TTL write is
 # WRITE_1H x input on every model, so it needs no column: turn_cost() applies
 # it to the tokens the transcript marks as 1h. Cache read is NOT a fixed share
-# of input any
-# more: 0.1x on most models, 0.05x on Opus/Sonnet 5.5, 0.025x on Fable/Mythos
-# 5.1 — so every row spells it out. Keys are matched as substrings of the
-# model id, longest key first — so "opus-5-5" wins over "opus".
+# of input any more: 0.1x on most models, 0.05x on Opus/Sonnet 5.5, 0.025x on
+# Fable/Mythos 5.1 — so every row spells it out.
+#
+# One row per model VERSION, and a row prices only its own version: "opus-5"
+# is Opus 5 (claude-opus-5, claude-opus-5-20260301) and never Opus 5.5 — see
+# price_row(). There are no family-wide rows: an "opus" row pricing every Opus
+# is how 5.5 came to be billed at 5.0 rates. A version with no row of its own
+# is reported as unpriced.
 # There is no pricing endpoint on the API, so this table cannot self-update:
 # it is written to PRICES_FILE on first use for you to edit.
 SEED_PRICES = {
     "fable-5-1": (10.0, 50.0, 0.25, 12.50), "mythos-5-1": (10.0, 50.0, 0.25, 12.50),
-    "fable": (10.0, 50.0, 1.00, 12.50), "mythos": (10.0, 50.0, 1.00, 12.50),
+    "fable-5": (10.0, 50.0, 1.00, 12.50), "mythos-5": (10.0, 50.0, 1.00, 12.50),
     "opus-5-5": (4.0, 20.0, 0.20, 5.00),
-    "opus": (5.0, 25.0, 0.50, 6.25),       # 5 and 4.5-4.8
-    "opus-4-1": (15.0, 75.0, 1.50, 18.75),
-    "opus-4-20": (15.0, 75.0, 1.50, 18.75),  # Opus 4: claude-opus-4-2025MMDD
+    "opus-5": (5.0, 25.0, 0.50, 6.25),
+    "opus-4-8": (5.0, 25.0, 0.50, 6.25), "opus-4-7": (5.0, 25.0, 0.50, 6.25),
+    "opus-4-6": (5.0, 25.0, 0.50, 6.25), "opus-4-5": (5.0, 25.0, 0.50, 6.25),
+    "opus-4-1": (15.0, 75.0, 1.50, 18.75), "opus-4": (15.0, 75.0, 1.50, 18.75),
     "sonnet-5-5": (2.0, 10.0, 0.10, 2.50),
     "sonnet-5": (2.0, 10.0, 0.20, 2.50),
-    "sonnet": (3.0, 15.0, 0.30, 3.75),
+    "sonnet-4-6": (3.0, 15.0, 0.30, 3.75), "sonnet-4-5": (3.0, 15.0, 0.30, 3.75),
+    "sonnet-4": (3.0, 15.0, 0.30, 3.75),
     # Haiku 5.5 is priced by prompt size: see BIG_PROMPT.
     "haiku-5-5": (0.10, 0.50, 0.01, 0.125),
     "haiku-5-5" + ">100k": (0.50, 2.50, 0.05, 0.625),
-    "haiku": (1.0, 5.0, 0.10, 1.25),
+    "haiku-4-5": (1.0, 5.0, 0.10, 1.25),
+    "3-5-haiku": (0.80, 4.0, 0.08, 1.00),   # the older naming: claude-3-5-haiku-…
+}
+# Rows earlier seeds wrote that no longer exist: the family-wide ones, and a
+# workaround key. Dropped from an existing file while still exactly as seeded;
+# one the user edited is theirs and stays (it no longer prices any version).
+RETIRED = {
+    "fable": (10.0, 50.0, 1.00, 12.50), "mythos": (10.0, 50.0, 1.00, 12.50),
+    "opus": (5.0, 25.0, 0.50, 6.25), "sonnet": (3.0, 15.0, 0.30, 3.75),
+    "haiku": (1.0, 5.0, 0.10, 1.25), "opus-4-20": (15.0, 75.0, 1.50, 18.75),
 }
 # A key ending in BIG_SUFFIX is the rate for the same model when one request's
 # prompt (input + cache read + cache write) passes BIG_PROMPT tokens. It can
@@ -60,7 +76,10 @@ SEED_CHECKED = "2026-10-07"
 SEED_NOTES = (
     "Edit the prices below when Anthropic's change; there is no API to fetch "
     "them. Order: input, output, cache_read, cache_write (USD per million "
-    "tokens). Keys match as substrings of the model id, longest first. A key "
+    "tokens). One row per model version, and a row prices only its own "
+    "version: 'opus-5' prices claude-opus-5 and claude-opus-5-20260301, never "
+    "claude-opus-5-5. A model with no row of its own is reported as unpriced "
+    "instead of being billed at another version's rate: add its row. A key "
     "ending in '>100k' is the rate for that model when a single prompt passes "
     "100,000 tokens (Haiku 5.5). cache_write is the 5-minute rate; 1-hour "
     "writes are billed at 2x input automatically, from what the transcript "
@@ -99,8 +118,12 @@ def load_prices():
         missing = [k for k in SEED_PRICES if k not in data["prices"]]
         for k in missing:
             data["prices"][k] = list(SEED_PRICES[k])
-        changed = bool(missing)
-        if missing:
+        retired = [k for k, old in RETIRED.items()
+                   if k in data["prices"] and _same_row(data["prices"][k], old)]
+        for k in retired:
+            del data["prices"][k]
+        changed = bool(missing or retired)
+        if changed:
             data["_notes"] = SEED_NOTES
             # Every seed row is now in the file exactly as the seed has it:
             # the table is as verified as the seed. An edited row keeps the
@@ -116,18 +139,49 @@ def load_prices():
     return data
 
 
+def _same_row(row, seed):
+    try:
+        return [float(x) for x in row] == [float(x) for x in seed]
+    except (TypeError, ValueError):
+        return False
+
+
 def seed_diffs(data):
     """Seed rows whose value in the file differs: [(key, in file, in seed)]."""
     out = []
     for key, seed in SEED_PRICES.items():
         row = (data.get("prices") or {}).get(key)
-        try:
-            same = [float(x) for x in row] == [float(x) for x in seed]
-        except (TypeError, ValueError):
-            same = False
-        if not same:
+        if not _same_row(row, seed):
             out.append((key, row, list(seed)))
     return out
+
+
+# Right after a key, "-5" or "-12" means the id names a LATER version than the
+# key does; "-20260301" (a date), "-v1" or "[1m]" does not.
+_LATER_VERSION = re.compile(r"-\d{1,2}(?!\d)")
+
+
+def price_row(model):
+    """The key of the row that prices `model`, or None.
+
+    A row prices exactly its own version: "opus-5" matches claude-opus-5 and
+    claude-opus-5-20260301 but not claude-opus-5-5. Plain substring matching
+    let a new version fall through to the nearest older or family-wide row and
+    be billed at its rate without a word — in the main thread and in every
+    subagent alike, since both are priced here."""
+    for key in sorted(load_prices().get("prices", {}), key=len, reverse=True):
+        if not key.endswith(BIG_SUFFIX) and same_version(model, key):
+            return key
+    return None
+
+
+def same_version(model, name):
+    """Does the id `model` name exactly the version `name` does? True for
+    ("claude-opus-5-20260301", "opus-5"), false for ("claude-opus-5-5",
+    "opus-5")."""
+    m = (model or "").lower()
+    at = m.find(name.lower())
+    return at >= 0 and not _LATER_VERSION.match(m, at + len(name))
 
 
 def price_for(model, prompt_tokens=0):
@@ -139,13 +193,13 @@ def price_for(model, prompt_tokens=0):
     for models that have a BIG_SUFFIX row."""
     m = (model or "").lower()
     prices = load_prices().get("prices", {})
-    for key in sorted(prices, key=len, reverse=True):
-        if key in m:
-            p = prices[key]
-            if prompt_tokens > BIG_PROMPT:
-                p = prices.get(key + BIG_SUFFIX, p)
-            if isinstance(p, list) and len(p) == 4:
-                return tuple(float(x) for x in p)
+    key = price_row(model)
+    if key:
+        p = prices[key]
+        if prompt_tokens > BIG_PROMPT:
+            p = prices.get(key + BIG_SUFFIX, p)
+        if isinstance(p, list) and len(p) == 4:
+            return tuple(float(x) for x in p)
     if m and m != "<synthetic>":
         _unknown.add(m)
     return None
@@ -254,7 +308,9 @@ def price_warnings():
                        f"confira {PRICES_FILE}")
     if _unknown:
         out.append(f"[!] sem preço cadastrado para {', '.join(sorted(_unknown))}"
-                   f" — esses turnos ficaram FORA do custo. Adicione em {PRICES_FILE}")
+                   f" — esses turnos ficaram FORA do custo. Cada versão tem a "
+                   f"própria linha (nenhuma herda o preço de outra): adicione "
+                   f"em {PRICES_FILE}")
     return out
 
 

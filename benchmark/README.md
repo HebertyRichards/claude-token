@@ -13,10 +13,13 @@ headless `claude -p` session and spends real tokens.
 
 ```bash
 python benchmark/run.py \
-    --prompt "Os testes de pagamento estão falhando. Corrija sem alterar os testes." \
-    --workspace ~/projetos/minha-api --kind bugfix \
-    --check "pytest -q" --unchanged tests/test_pagamento.py \
+    --prompt "The payment tests are failing. Fix the code without changing the tests." \
+    --workspace ~/projects/my-api --kind bugfix \
+    --check "pytest -q" --unchanged tests/test_payment.py \
     --model haiku --reps 3
+
+# other models than the one your session runs on, older versions included
+python benchmark/run.py ... --model opus --model sonnet --model haiku --model claude-opus-5
 
 python benchmark/run.py ... --dry-run      # the plan and your plan usage; runs nothing
 python benchmark/run.py --resume           # continue the latest unfinished file
@@ -37,15 +40,15 @@ Requires `claude-token on` (the ON arm needs the hooks registered).
 | `--expect REGEX` | the final answer must match — for tasks that only answer |
 | `--unchanged FILE` | a file the model must not touch (the tests, in a bugfix) |
 | `--allow RULE` | an extra tool rule, in `--allowedTools` syntax: `"Bash(npm *)"` |
-| `--model M` | anything `claude --model` takes; repeat it to compare models |
+| `--model M` | anything `claude --model` takes — an alias (`opus`, `sonnet`, `haiku`) or a full id (`claude-opus-5`, `claude-sonnet-4-6`); repeat it to test several. It has nothing to do with the model your own session is on |
+| `--subagent-model M` | the model for any subagent the task starts (default: the main thread's). `--model claude-opus-5-5 --subagent-model sonnet` measures an Opus session that delegates to Sonnet. The built-in `Explore` subagent is ruled out in that case: it keeps the main thread's model whatever is asked |
 | `--reps N`, `--level 1\|2`, `--effort` | runs per arm, the ON arm's level, passed through |
 
 - **Your project is never modified.** Every run works on a fresh copy in a temp
   folder. Version-control history, `node_modules`, virtualenvs and anything
   shaped like a credential are not copied (see below); if the task needs
   dependencies, install them with `--setup`.
-- **The prompt must have 4 to 200 words** (counting a one-line note the
-  benchmark appends): outside that range claude-token's hook injects nothing
+- **The prompt must have 4 to 200 words**: outside that range claude-token's hook injects nothing
   and the two arms would be identical.
 - **Give it a way to verify.** Without `--check` or `--expect` the benchmark
   cannot tell a finished task from an abandoned one, and the report says so.
@@ -91,7 +94,14 @@ rights. A task verified with `python …` lets the model run Python, and Python
 can do whatever you can. Keep `--allow` narrow, and do not benchmark a task
 whose instructions require touching what the guards protect.
 
-Your `--setup` and `--check` commands are yours and run outside these fences.
+Your own `--setup` and `--check` commands obey the same fences: one that
+involves git or a credential file is refused before anything runs, and they
+execute in the same environment, where git is inert.
+
+Afterwards every run is audited from its transcript, subagents included: the
+shell commands that ran are counted, and if a forbidden one went *through* —
+not refused, executed — the run is marked `invalid` and named in the report.
+
 The benchmark itself only ever reads from git: `git rev-parse` and
 `git status` on its own repository, to stamp the results with the code version.
 
@@ -112,9 +122,25 @@ run that does not, is marked `invalid` and left out of the comparison.
 - **From the transcript**, with the functions `claude-token report` uses:
   subagents included, deduped by message id, priced by your local table. The
   CLI's own `total_cost_usd` is stored beside it as a cross-check.
+- **Each response at its own model's rate.** A price row covers exactly one
+  version: Opus 5.5 is never billed as Opus 5, and a subagent on another model
+  than the main thread is billed as that model. A version the table lacks is
+  reported as unpriced, not guessed. The report shows the id an alias resolved
+  to, the models subagents ran on and what they cost.
+- **The model that ran is the model you asked for.** A run whose transcript
+  shows another one is marked `invalid`.
 - **Only runs that completed the task count.** A run that spent less because it
   stopped early is a failure, not a saving. Different success rates between the
   arms are flagged.
+- **One folder, warm cache.** Every run works in the same temp folder, and one
+  trivial call per model comes first. The folder's path is part of what the
+  CLI sends, so a new folder per run meant some ten thousand tokens written
+  to the prompt cache again each time; with a fixed one they are read, which
+  on Opus is most of what a small run costs. The warm-up belongs to neither
+  arm, and its cost is reported apart. `--no-warmup` skips it.
+- **Against a target.** With `--kind baixo`, `medio` or `alto` the report sets
+  the measured saving beside the band the tool aims for at that level (2–5%,
+  7–12%, 15–23% of cost) and says whether it was reached.
 - **The first arm alternates** from one pair to the next: the first run of a
   pair pays the cache write for the prefix both share, so a fixed order would
   favour the second.
@@ -136,14 +162,26 @@ and stops when a run could cross a ceiling:
 | `--run-budget` | 3 | US$ for one run, via `--max-budget-usd` |
 | `--timeout` | 900 | seconds for one run |
 
-The margin is what the latest runs consumed (at least one point, the reading's
-resolution): at 78% with runs taking 4 points each, it stops rather than land
-on 82%. If the usage cannot be read it runs nothing; `--no-plan-guard` is for
+The ceiling is enforced on each run, not noticed afterwards. From the headroom
+left and what a dollar costs in plan points on your account, the benchmark
+works out how much the next run may spend and hands that to the CLI as the
+run's hard budget (`--max-budget-usd`): a run that would cross the line is cut
+there and redone on `--resume`, and a run the headroom cannot pay for is not
+started. What a run costs is taken from the task's own finished runs; a task
+with none yet goes by the other results in the same folder — the median of the
+runs on that model, of tasks of the same `--kind` when there are any — so a
+dear task is not begun on the last few points only to be cut halfway. The
+points-per-dollar rate is measured from your own runs and kept in
+`results/plan-rate.json` for every later benchmark; until one has been
+measured, a conservative default is used. If the usage cannot be read it runs
+nothing; `--no-plan-guard` is for
 accounts with no subscription, together with `--max-cost`.
 
 ## Results and resume
 
-Everything a run produces goes to `benchmark/results/`, which is git-ignored:
+Everything a run produces goes to `benchmark/results/`, created on the first
+run and covered by the repo's `.gitignore`, so nothing written there is ever
+committed:
 `bench-<date>.json` (the description, every attempt, the comparison) and
 `bench-<date>.transcripts/`. The per-copy folders the CLI creates under
 `~/.claude/projects` are removed, so benchmark sessions do not show up in
@@ -156,13 +194,26 @@ rest are redone. A run that was in flight is recorded as `interrupted` with
 whatever its transcript shows it spent, then run again. `--retry-errors` also
 redoes runs that errored.
 
+Two things keep a paid run from being wasted on a broken check:
+
+- **Before spending anything**, the setup and check commands are run once on
+  an untouched copy. A check that cannot even start — a wrong path — is an
+  error there instead of a failure in every paid run, and one that already
+  passes is reported as unable to tell done from not done. `--no-preflight`
+  skips it.
+- **Afterwards**, `--recheck [file]` verifies paid runs again without the
+  model. Each run's final answer and the files it changed are kept with the
+  results, so its working copy is rebuilt and the checks run again — with a
+  corrected `--check` or `--expect` when the original was wrong.
+
 Exit codes: `0` done, `1` bad configuration, `2` three errors in a row, `3`
 stopped at a limit, `130` interrupted.
 
 ## What it does not tell you
 
-- **Interactive cost.** A headless run has nobody to answer, so every prompt,
-  in both arms, ends with a line saying not to ask questions. In real use
+- **Interactive cost.** A headless run has nobody to answer, so both arms get
+  a line in the system prompt saying not to ask questions (your prompt itself
+  is sent untouched). In real use
   claude-token's scope rule makes the model ask which model to continue on;
   that extra round trip is not measured here.
 - **Permission prompts.** Headless, a tool call that would ask for permission
@@ -174,13 +225,3 @@ stopped at a limit, `130` interrupted.
   can cost more than they save, and the benchmark will say so.
 - **Plan percentage.** Cost is an estimate from public per-token prices; the
   plan window is the source of truth for what you have left.
-
-## Tests
-
-```bash
-python -m unittest discover -s benchmark/tests
-```
-
-They drive the whole harness — description, ceilings, resume, recovery of a
-killed run, arm validation — against a fake CLI in a temp home: no tokens, and
-nothing under your real `~/.claude` is touched.

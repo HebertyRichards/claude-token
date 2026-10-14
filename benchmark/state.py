@@ -50,6 +50,27 @@ def latest(unfinished=False):
     return ""
 
 
+def history(folder, model, kind, skip=""):
+    """What runs that went to the end cost in the other results files of
+    `folder`, on this model: those of tasks of the same kind when there are
+    any, otherwise all of them."""
+    same, rest = [], []
+    for path in glob.glob(os.path.join(folder, "*.json")):
+        if os.path.abspath(path) == os.path.abspath(skip):
+            continue
+        state = load_json(path, None)
+        if not isinstance(state, dict) or state.get("version") != VERSION:
+            continue
+        for run in state.get("runs") or []:
+            if run.get("model") != model:
+                continue
+            for att in run.get("attempts") or []:
+                cost = (att.get("usage") or {}).get("cost")
+                if att.get("status") in ("ok", "check_failed") and cost:
+                    (same if kind and run.get("kind") == kind else rest).append(cost)
+    return same or rest
+
+
 def reopen(state, retry_errors=False):
     """Make an unfinished file runnable again. Returns the attempts that were
     in flight when the process died: the caller measures what they spent."""

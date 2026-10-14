@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from common import (CLAUDE_DIR, CONTEXT_WINDOW, TTL_1H, WRITE_1H, cache_ttl,
                     fetch_plan_usage, fmt_k, level, load_json, load_state,
@@ -15,6 +15,7 @@ from usage import segment_usage, subagent_usage
 WEEKDAYS = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
 USAGE_CACHE = os.path.join(CLAUDE_DIR, "claude-token-usage-cache.json")
 USAGE_TTL = 120  # segundos entre consultas ao endpoint (statusline roda direto)
+COLD_ADVICE = 30_000  # tokens: acima disso, cache frio pede /compact ou conversa nova
 
 
 def _dot(pct):
@@ -124,14 +125,22 @@ def cmd_statusline():
         warm = False
     cache = "cache🔥" if warm else "cache🧊"
     if expired and ctx:
-        # What the expiry costs is one re-read of the context, and it is paid
-        # by a /compact just the same. Show the size of it instead of advising:
-        # at a small context a cold turn is not worth reorganizing a session.
+        # What the expiry costs: the next turn writes the whole context to
+        # the cache again, at the write rate — the dearest there is. Shown
+        # before the user types, which is the only moment it can be avoided.
         cache += f" reler {fmt_k(ctx)}"
         p = price_for(entries[-1][1], ctx)
         if p:
             write = p[0] * WRITE_1H if ttl == TTL_1H else p[3]
             cache += f" ≈${ctx * write / 1e6:.2f}"
+        if ctx >= COLD_ADVICE:
+            # A big context is cheaper to summarize or leave behind than to
+            # rewrite and then drag through every later turn.
+            cache += " → /compact ou conversa nova"
+    elif warm and last:
+        # Until when the next turn is still a cheap cache read: a cache that
+        # lasts an hour is only worth having if it is used before it goes.
+        cache += f" até {(last + timedelta(seconds=ttl)).astimezone():%H:%M}"
 
     st = load_state()
     ps = st.get("periods", [])

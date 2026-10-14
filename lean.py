@@ -48,40 +48,53 @@ def test_hints(cwd):
     return hints
 
 
-def lean_note(cwd, session_id):
-    """Lean-output rules, injected on the first qualifying prompt of a session."""
+def lean_note(cwd, session_id, building=True):
+    """Session rules, each given once: the core on the first qualifying
+    prompt, the scope rule the first time something is going to be built."""
     if not session_id:
         return ""
     seen = load_json(SESSIONS, {})
-    if session_id in seen:
+    # 1: core rules given; 2: scope rule given too (True is the old marker).
+    have = 2 if seen.get(session_id) is True else int(seen.get(session_id) or 0)
+    want = 2 if building else 1
+    if have >= want:
         return ""
-    seen[session_id] = True
+    seen[session_id] = want
     if len(seen) > 50:  # sessions come and go; keep the file tiny
         seen = dict(list(seen.items())[-50:])
     try:
         save_json(SESSIONS, seen)
     except OSError:
         pass
-    hints = test_hints(cwd)
-    runners = f" ({'; '.join(hints)})" if hints else ""
-    return ("[claude-token] Before starting any implementation: once you have "
-            "actually looked at the code, state the real scope in one line "
-            "(which files, roughly how much), then use AskUserQuestion to let "
-            "the user choose — continue on this model, or delegate to a "
-            "subagent on a cheaper one. Never estimate scope from the request "
-            "alone, and never propose switching /model mid-session (the "
-            "prompt cache is per model: the whole conversation reloads "
-            "uncached).\n"
-            "[claude-token] Lean-output rules for this session: run tests "
-            f"with quiet reporters{runners}; never dump raw API/HTML bodies — "
-            "filter with `jq`/`grep` or pipe through `claude-token toon` "
-            "(HTML: add `--keep script,css` when the user's analysis targets "
-            "JS or CSS — match what they asked); "
-            "inspect DOM via selectors/snippets, never full-page dumps; long "
-            "command output goes to a file, then read only its tail; read "
-            "PDFs by narrow page ranges (each page ~1.5-3k tokens); each "
-            "image/screenshot costs ~1.1-1.6k tokens — do not re-capture "
-            "what you already saw.")
+    parts = []
+    if have < 1:
+        hints = test_hints(cwd)
+        runners = f" ({'; '.join(hints)})" if hints else ""
+        # Every character here is written to the prompt cache at the 1-hour
+        # rate (twice the input price) and read back on every later turn: the
+        # rules only pay for themselves while they stay short.
+        # The rule on comments says which side wins, not "go and verify":
+        # told to confirm comments in the implementation, the model opened
+        # file after file to check one, and a one-file question cost up to
+        # 2.4 times as much.
+        parts.append(
+            "[claude-token] Session rules. The code decides: comments and "
+            "docs may be stale. Where they disagree, follow the code; do not "
+            "open other files just to check a comment. Keep tool output "
+            "small: quiet test "
+            f"reporters{runners}, grep/jq or `claude-token toon` instead of "
+            "raw bodies, long output to a file then its tail, big files and "
+            "PDFs by range, no screenshot captured twice.")
+    if building:
+        # Only when something is going to be built: on a plain question the
+        # scope line and the model question are nothing but extra output.
+        parts.append(
+            "[claude-token] Before implementing: look at the code, state the "
+            "real scope in one line, then ask the user (AskUserQuestion) "
+            "whether to continue on this model or delegate to a cheaper "
+            "subagent. Never suggest switching /model mid-session: the "
+            "prompt cache is per model.")
+    return "\n".join(parts)
 
 
 def cmd_posttool():
@@ -128,9 +141,21 @@ def cmd_posttool():
     elif any(r in cmd for r in TEST_RUNNERS):
         hint = ("use the quiet reporter (-q / --reporter=dot / --silent) and "
                 "show only the failures")
-    else:
+    # The advice has to fit the tool: a file read or a search has no command
+    # whose output could be redirected.
+    elif tool == "Read":
+        hint = ("read only the lines you need (offset/limit), finding them "
+                "with Grep first")
+    elif tool in ("Grep", "Glob"):
+        hint = "narrow the pattern or the path"
+        if tool == "Grep":
+            hint += (", or list the matching files first "
+                     "(output_mode=files_with_matches) and cap it with head_limit")
+    elif ti.get("command"):
         hint = ("redirect to a file and read only the tail: "
                 "`cmd > /tmp/out 2>&1; tail -30 /tmp/out`")
+    else:
+        hint = "ask for less: a narrower query, a filter or a range"
     ctx = (f"[claude-token] That {tool} result was ~{size // 4:,} tokens and "
            f"now rides in the context every turn until /compact. Next time, "
            f"{hint}.")

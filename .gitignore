@@ -14,5 +14,5 @@ __pycache__/
 .idea/
 .DS_Store
 
-# Benchmark output: results and the transcripts filed with them
+# Benchmark output: results, transcripts and local case files
 benchmark/results/

@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from common import (CLAUDE_DIR, HOME, PROJECTS, WRITE_1H, cache_writes, fmt_k,
-                    load_json, parse_ts, price_for, price_warnings)
+                    load_json, parse_ts, price_for, price_row, price_warnings)
 from usage import collect, session_usage
 
 
@@ -80,12 +80,12 @@ Como manter o cache quente:
   - não edite CLAUDE.md/settings no meio da sessão (invalida o prefixo)
   - prefira continuar a sessão a abrir outra para o mesmo assunto
 
-Cache já esfriou? Não é motivo automático para /compact ou chat novo:
-  - o custo é UMA releitura do contexto, e o /compact paga a mesma releitura
-    para resumir — a statusline mostra o tamanho dela (cache🧊 reler N ≈$X)
-  - contexto pequeno: só continue
-  - contexto grande e ainda muitos turnos pela frente: /compact compensa,
-    porque cada turno seguinte relê menos
+Use a conversa enquanto o cache está quente: a statusline mostra até que horas
+(cache🔥 até HH:MM). Depois que esfria, o próximo turno regrava o contexto
+inteiro a preço de gravação, o mais caro que existe:
+  - contexto grande: /compact ou conversa nova ANTES de continuar — a
+    statusline avisa (cache🧊 reler N ≈$X → /compact ou conversa nova)
+  - contexto pequeno: só continue, a regravação custa pouco
   - assunto novo: /clear, com cache quente ou frio
 """)
 
@@ -127,6 +127,17 @@ def cmd_report(argv):
               f"US$ {sub['cost']:,.2f}"
               f"\n  por resposta: ${sub['cost'] / sub['turns']:.4f} no subagente"
               f" · ${main_avg:.4f} na conversa principal")
+    # Which row priced each model, main thread and subagents alike: the one
+    # place to see that a version is billed at its own rate and no other's.
+    print("\npor modelo (linha de preço usada: entrada/saída por milhão):")
+    for model, m in sorted(b["models"].items(), key=lambda kv: -kv[1]["cost"]):
+        p = price_for(model)
+        price = (f"{price_row(model)}: {p[0]:g}/{p[1]:g}" if p
+                 else "SEM PREÇO — fora do custo")
+        who = " + ".join(x for x in (
+            f"{m['turns']:,} resp" if m["turns"] else "",
+            f"{m['sub_turns']:,} de subagente" if m["sub_turns"] else "") if x)
+        print(f"  {model:<28} {who:<28} US$ {m['cost']:>9,.2f}   {price}")
     show_price_warnings()
     print("\nEm plano de assinatura o dólar acima é referência: o limite que"
           "\naperta é a janela do plano, que a statusline mostra ao vivo.\n")

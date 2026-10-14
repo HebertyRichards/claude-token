@@ -12,12 +12,22 @@ local text injection or local file reading.
 reporters, no raw API/HTML dumps, long output to a file then read its tail,
 PDFs by narrow page range, no re-capturing screenshots. Plus a rule to state
 the real scope *after looking at the code* and ask you which model to use —
-never to guess the size of a task from the request alone.
+never to guess the size of a task from the request alone. And a rule on what
+to trust: the code that implements the logic decides; comments, docstrings and
+docs are hints that may be stale, and when they disagree with the code the
+model follows the code. It is told which side wins, not to go and verify:
+asked to confirm every comment in the implementation, it opened file after
+file to check one, and a one-file question cost up to 2.4 times as much. The
+scope rule is only given the first time something is going to be built — a
+plain question never gets it — and the whole text is kept short on purpose: it
+is written to the prompt cache at the write rate and read back on every later
+turn.
 
 **Oversized-result watcher** — a `PostToolUse` hook flags any tool result over
-~5k tokens and names the specific fix (`| jq`, quiet reporter, `| claude-token
-toon`, redirect-and-tail). Reactive but deterministic: it fires no matter what
-the model forgot.
+~5k tokens and names the fix that fits the tool: `| jq` or `| claude-token
+toon` for a fetched body, the quiet reporter for a test run, redirect-and-tail
+for any other command, a line range for a file read, a narrower pattern for a
+search. Reactive but deterministic: it fires no matter what the model forgot.
 
 **Compact memory** — `/compact` empties the model's context, not the
 transcript: the discarded turns stay on disk in the same `.jsonl`. So after a
@@ -34,6 +44,14 @@ language.
 (40-line chunks, camelCase/snake_case aware). With an index present, each
 prompt gets the top matching `file:start-end` ranges injected, so Claude reads
 snippets instead of dumping whole files into context. Offline, no embeddings.
+Logic ranks first: code that matches comes before any comment, docstring,
+string literal, data file or doc page, however often those repeat the words.
+And it stays silent more often than it speaks, because a pointer costs tokens
+on every later turn and a wrong one sends the model to the wrong file: nothing
+is injected when the best match is not code, when it shares a single word with
+the request, or when the request already names a file small enough to be read
+whole. Overlapping ranges of one file are merged into one pointer. Rebuild the index (`claude-token
+index`) to get this ordering on a project indexed before.
 
 **Session lookup by id** — `sessions` lists past conversations, `recall
 <query>` finds which ones mention something, `memory <id>` prints what was
@@ -82,11 +100,12 @@ sessão (36 resp): leitura 3.4M · saída 58.8k · custo ~$2.77 · 1 subagente(s
   session has been idle past its cache TTL, or right after a compact. The TTL
   is read from the session's own cache writes — 1 hour on a subscription, 5
   minutes otherwise — never assumed.
-- `cache🧊 reler 135.2k ≈$1.08` — when the cache has expired, what the next
-  turn will re-read and roughly cost. That is the whole price of the expiry,
-  and a `/compact` pays the same re-read to summarize, so an expired cache is
-  not by itself a reason to compact or start over: it depends on that number
-  and on how many turns are still ahead.
+- `cache🔥 até 15:42` — until when the next turn is still a cheap cache read.
+  The cache is only worth having if the conversation is used before it goes.
+- `cache🧊 reler 135.2k ≈$1.08 → /compact ou conversa nova` — when the cache
+  has expired, what the next turn will write back and roughly cost, at the
+  write rate, the dearest there is. Above 30k tokens of context it recommends
+  `/compact` or a new conversation before continuing; below that, just go on.
 - `· 1 subagente(s) ~$0.04` — what the subagents spawned since the last
   compact cost. Their turns live in `<session>/subagents/`, not in the
   transcript, so they are shown apart from the session's own totals.
@@ -141,7 +160,10 @@ is worse than none:
   repo verified more recently, the reports name it.
 - **An unpriced model is reported, never guessed.** Its tokens are counted and
   its cost is left out, with a warning naming the model — rather than billing
-  it silently at some other model's rate.
+  it silently at some other model's rate. That holds between versions too: a
+  price row covers exactly one version, so Opus 5.5 can only be priced by the
+  Opus 5.5 row, never by Opus 5's, in the main thread and in subagents alike.
+  `report` lists which row priced each model.
 - **Compaction stats say what they are.** XML that only got minified is
   labeled as minified; a `.docx` reports the resulting token count instead of
   a percentage against zip bytes it was never comparable to.
@@ -158,8 +180,9 @@ completed the task. There are no bundled scenarios: the number is about your
 work, not a toy project's.
 
 ```bash
-python benchmark/run.py --prompt "Os testes de pagamento estão falhando. Corrija sem alterar os testes." \
-    --workspace ~/projetos/minha-api --kind bugfix --check "pytest -q" --model haiku --reps 3
+python benchmark/run.py --prompt "The payment tests are failing. Fix the code without changing the tests." \
+    --workspace ~/projects/my-api --kind bugfix --check "pytest -q" \
+    --model opus --model sonnet --model haiku --reps 3
 python benchmark/run.py --resume           # continue after a stop
 ```
 

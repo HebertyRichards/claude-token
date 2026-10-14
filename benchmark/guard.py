@@ -1,16 +1,26 @@
 """Budget guard. The benchmark spends real plan tokens, so before every run it
-reads the account's 5-hour and weekly windows and refuses to start a run that
-would cross the ceilings — including one that would cross them by its own
-consumption, judged by what the latest runs took."""
+reads the account's 5-hour and weekly windows and works out how many dollars
+that run may cost without crossing a ceiling. The amount goes to the CLI as
+the run's hard budget: a run that would cross the line is cut by the CLI
+itself instead of being discovered afterwards."""
+import os
 from datetime import timedelta
 
-from common import fetch_plan_usage, parse_ts
+from common import fetch_plan_usage, load_json, parse_ts, save_json
 
 # key in the usage payload, label for the user, `kind` in its `limits` list
 WINDOWS = (("five_hour", "5 h", "session"), ("seven_day", "semana", "weekly_all"))
 WEEKDAYS = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
-KEEP_STEPS = 5      # how many recent runs the margin looks at
-MIN_STEP = 1.0      # the reading comes in whole points: never assume less
+# Plan points that one dollar of usage costs, per window, until this account's
+# own rate has been measured. Deliberately the rate of the smallest plan: on a
+# bigger one a dollar moves the window less, so the default only ever errs
+# towards stopping early.
+DEFAULT_RATE = {"five_hour": 7.0, "seven_day": 1.0}
+RATE_FILE = "plan-rate.json"    # beside the results: shared by every benchmark
+RESOLUTION = 1.0    # readings come in whole points: keep one in hand
+SAFETY = 0.85       # share of the computed headroom a run may actually use
+MIN_BUDGET = 0.05   # USD: with less than this a run cannot do anything useful
+LEARN_FROM = 3.0    # points: a smaller move is mostly rounding
 
 
 def read_windows(data):
@@ -54,31 +64,36 @@ def _same_window(a, b):
 
 
 class Guard:
-    def __init__(self, ceilings, max_cost=0.0, saved=None, fetch=None, enabled=True):
+    def __init__(self, ceilings, max_cost=0.0, folder="", fetch=None, enabled=True):
         self.ceilings = {k: v for k, v in ceilings.items() if v}
         self.max_cost = max_cost or 0.0
         self.fetch = fetch or fetch_plan_usage
         self.enabled = enabled
-        saved = saved or {}
-        self.steps = {k: list(v) for k, v in (saved.get("steps") or {}).items()}
-        self.reading = saved.get("reading")
-        # The previous reading of THIS process only: one taken before a resume
-        # has hours of unrelated usage between it and now, not one run.
-        self.last = None
+        self.reading = None
+        # What a dollar costs in plan points is a property of the account, not
+        # of one benchmark, so it is kept beside the results and every run of
+        # every benchmark starts from what the earlier ones measured.
+        self.rate_path = os.path.join(folder, RATE_FILE) if folder else ""
+        self.rates, self.measured = dict(DEFAULT_RATE), set()
+        saved = load_json(self.rate_path, {}) if self.rate_path else {}
+        for key in DEFAULT_RATE:
+            if isinstance(saved, dict) and _number(saved.get(key)) and saved[key] > 0:
+                self.rates[key] = float(saved[key])
+                self.measured.add(key)
 
     def snapshot(self):
-        return {"steps": self.steps, "reading": self.reading}
+        return {"reading": self.reading, "rates": self.rates,
+                "measured": sorted(self.measured)}
 
-    def margin(self, key):
-        return max([MIN_STEP] + (self.steps.get(key) or []))
-
-    def check(self, spent):
-        """(ok, reason). Call once, right before each run."""
+    def check(self, spent, need=MIN_BUDGET):
+        """(ok, reason, budget). Call once, right before each run. `need` is
+        what a run of this benchmark has been costing; `budget` is the most
+        the next one may cost, in USD (None when no plan window limits it)."""
         if self.max_cost and spent >= self.max_cost:
             return False, (f"orçamento de US$ {self.max_cost:.2f} atingido "
-                           f"(gasto até aqui: US$ {spent:.2f})")
+                           f"(gasto até aqui: US$ {spent:.2f})"), None
         if not self.enabled:
-            return True, ""
+            return True, "", None
         now = read_windows(self.fetch(timeout=10))
         missing = [label for key, label, _ in WINDOWS
                    if key in self.ceilings and key not in now]
@@ -87,27 +102,53 @@ class Guard:
                            + ", ".join(missing) + "): sem essa leitura o teto "
                            "não pode ser garantido. Tente de novo; se a conta "
                            "não é de assinatura, use --no-plan-guard com "
-                           "--max-cost")
-        if self.last:
-            for key in self.ceilings:
-                prev = self.last.get(key)
-                if prev and _same_window(prev["resets_at"], now[key]["resets_at"]):
-                    step = now[key]["pct"] - prev["pct"]
-                    if step >= 0:
-                        self.steps[key] = (self.steps.get(key, [])
-                                           + [round(step, 2)])[-KEEP_STEPS:]
-        self.last = self.reading = now
+                           "--max-cost"), None
+        self.reading = now
+        budget = None
         for key, label, _ in WINDOWS:
             if key not in self.ceilings:
                 continue
-            pct, top, margin = now[key]["pct"], self.ceilings[key], self.margin(key)
+            pct, top = now[key]["pct"], self.ceilings[key]
             when = fmt_reset(now[key]["resets_at"])
             if pct >= top:
                 return False, (f"janela de {label} em {pct:.0f}%, teto de "
-                               f"{top:.0f}% — zera {when}")
-            if pct + margin > top:
-                return False, (f"janela de {label} em {pct:.0f}%: a próxima "
-                               f"execução poderia passar do teto de {top:.0f}% "
-                               f"(as últimas consumiram até {margin:.0f} "
-                               f"ponto(s) cada) — zera {when}")
-        return True, ""
+                               f"{top:.0f}% — zera {when}"), None
+            allowed = (top - pct - RESOLUTION) / self.rates[key] * SAFETY
+            if allowed < need:
+                return False, (
+                    f"janela de {label} em {pct:.0f}%: a folga até o teto de "
+                    f"{top:.0f}% comporta ~US$ {max(allowed, 0):.2f}, menos do "
+                    f"que uma execução vem custando (~US$ {need:.2f}) — zera "
+                    f"{when}"), None
+            budget = allowed if budget is None else min(budget, allowed)
+        return True, "", budget
+
+    def learn(self, before, cost):
+        """After a run: read the windows again and, when the run moved one
+        visibly, record how many points a dollar costs on this account. The
+        highest rate seen is the one kept — the cautious one. Returns the new
+        reading."""
+        if not self.enabled or not before:
+            return None
+        after = read_windows(self.fetch(timeout=10))
+        learned = False
+        for key in self.ceilings:
+            a, b = after.get(key), before.get(key)
+            if not a or not b or not _same_window(b["resets_at"], a["resets_at"]):
+                continue
+            step = a["pct"] - b["pct"]
+            if step >= LEARN_FROM and cost > 0:
+                rate = step / cost
+                if key not in self.measured or rate > self.rates[key]:
+                    self.rates[key] = round(rate, 3)
+                    self.measured.add(key)
+                    learned = True
+        if learned and self.rate_path:
+            try:
+                os.makedirs(os.path.dirname(self.rate_path), exist_ok=True)
+                save_json(self.rate_path, {k: self.rates[k] for k in sorted(self.measured)})
+            except OSError:
+                pass
+        if after:
+            self.reading = after
+        return after

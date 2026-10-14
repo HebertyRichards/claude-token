@@ -39,6 +39,14 @@ def iter_usage(path):
     return _read(path)[0].values()
 
 
+def subagent_files(path):
+    """Transcripts of every subagent a session spawned. Recursive: agents
+    started by a workflow sit one or two folders further down
+    (subagents/workflows/<run>/agent-*.jsonl), and they bill the same."""
+    folder = os.path.join(os.path.splitext(path)[0], "subagents")
+    return sorted(glob.glob(os.path.join(folder, "**", "*.jsonl"), recursive=True))
+
+
 def subagent_usage(path):
     """One list of entries per subagent the session spawned.
 
@@ -48,8 +56,7 @@ def subagent_usage(path):
     flagged isSidechain. Leaving them out hid real spend — and hid what
     delegating to a cheaper model costs per response."""
     agents = []
-    folder = os.path.join(os.path.splitext(path)[0], "subagents")
-    for sub in sorted(glob.glob(os.path.join(folder, "*.jsonl"))):
+    for sub in subagent_files(path):
         main, side = _read(sub)
         entries = list({**main, **side}.values())
         if entries:
@@ -138,11 +145,12 @@ def in_on_period(dt, ps):
 
 def collect(days):
     """Totals for the last N days: the main thread split into ECO-on vs
-    ECO-off buckets, plus a "sub" bucket for everything subagents spent."""
+    ECO-off buckets, plus a "sub" bucket for everything subagents spent, and
+    "models": per model id, how many responses of each kind and their cost."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     ps = periods()
     zero = dict(turns=0, inp=0, out=0, cr=0, cw=0, cost=0.0)
-    b = {"on": dict(zero), "off": dict(zero), "sub": dict(zero)}
+    b = {"on": dict(zero), "off": dict(zero), "sub": dict(zero), "models": {}}
 
     for path in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
         if os.path.getmtime(path) < cutoff.timestamp():
@@ -163,5 +171,11 @@ def collect(days):
                 # Unpriced model: count the tokens, leave the cost out rather
                 # than bill it at some other model's rate (price_for warns
                 # separately).
-                t["cost"] += turn_cost(model, u) or 0.0
+                cost = turn_cost(model, u) or 0.0
+                t["cost"] += cost
+                if model != "<synthetic>":
+                    m = b["models"].setdefault(
+                        model, {"turns": 0, "sub_turns": 0, "cost": 0.0})
+                    m["sub_turns" if is_sub else "turns"] += 1
+                    m["cost"] += cost
     return b

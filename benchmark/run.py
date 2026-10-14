@@ -25,6 +25,7 @@ import json
 import os
 import platform
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,9 @@ DEFAULTS = {"model": ["haiku"], "reps": 2, "level": 2, "effort": "",
             "run_budget": 3.0, "timeout": 900}
 # What may still be changed when resuming: the plan itself is fixed by then.
 ADJUSTABLE = ("max_5h", "max_week", "max_cost", "run_budget", "timeout")
+WORK = os.path.join(os.path.realpath(tempfile.gettempdir()),
+                    runner.WORKSPACE_PREFIX + "work")
+WARMUP_PROMPT = "Reply with the single word: ok"
 STATUS_TEXT = {"ok": "ok", "check_failed": "FALHOU na verificação", "error": "ERRO",
                "limit": "LIMITE da conta", "invalid": "INVÁLIDA",
                "interrupted": "interrompida"}
@@ -89,6 +93,9 @@ def parse(argv):
     how.add_argument("--model", action="append",
                      help="modelo ou alias aceito pelo `claude --model`; repita "
                           "para vários (padrão: haiku)")
+    how.add_argument("--subagent-model", metavar="MODELO",
+                     help="modelo dos subagentes que a tarefa criar (padrão: o "
+                          "mesmo da conversa principal)")
     how.add_argument("--reps", type=int, help="execuções por braço (padrão: 2)")
     how.add_argument("--level", type=int, choices=(1, 2),
                      help="nível do claude-token no braço ON (padrão: 2)")
@@ -96,6 +103,12 @@ def parse(argv):
     how.add_argument("--timeout", type=int, help="segundos por execução (padrão: 900)")
     how.add_argument("--keep-workspaces", action="store_true",
                      help="não apaga as cópias de trabalho (para depurar)")
+    how.add_argument("--no-warmup", action="store_true",
+                     help="não faz a chamada inicial que deixa o cache de prompt "
+                          "quente para os dois braços")
+    how.add_argument("--no-preflight", action="store_true",
+                     help="não testa os comandos de --setup/--check numa cópia "
+                          "intocada antes de gastar tokens")
     how.add_argument("--claude", nargs="+", metavar="CMD",
                      help="comando da CLI (padrão: `claude` do PATH)")
 
@@ -121,6 +134,9 @@ def parse(argv):
                      help="com --resume: refaz também as execuções que deram erro")
     out.add_argument("--report", nargs="?", const="", metavar="ARQUIVO",
                      help="imprime a comparação de um arquivo (sem valor: o mais recente)")
+    out.add_argument("--recheck", nargs="?", const="", metavar="ARQUIVO",
+                     help="refaz a verificação das execuções já pagas, sem chamar "
+                          "o modelo; com --check/--expect, troca a verificação")
     out.add_argument("--dry-run", action="store_true",
                      help="mostra o plano e o uso do plano; não executa nada")
     return p.parse_args(argv)
@@ -150,7 +166,13 @@ def new_state(args):
     # flags, and the file says by itself what was measured.
     cfg.update(plan_guard=not args.no_plan_guard, scenario=sc,
                headless_note=scenario.HEADLESS_NOTE,
-               denied_tools=scenario.denied_tools())
+               # The built-in Explore subagent keeps the main thread's model
+               # whatever is asked; without it the model falls back to the
+               # general-purpose one, which does run on the requested model.
+               denied_tools=scenario.denied_tools()
+               + (["Agent(Explore)"] if args.subagent_model else []),
+               subagent_model=args.subagent_model or "",
+               warmup=not args.no_warmup)
     env = {"platform": sys.platform, "python": platform.python_version(),
            "claude": "", "claude_token": _git_version()}
     return states.new(cfg, build_plan(sc, cfg["model"], cfg["reps"]), env)
@@ -224,8 +246,50 @@ def hooks_installed():
 
 
 def spent(state):
-    return sum((a.get("usage") or {}).get("cost") or 0
-               for r in state["runs"] for a in r["attempts"])
+    return (sum((a.get("usage") or {}).get("cost") or 0
+                for r in state["runs"] for a in r["attempts"])
+            + sum(w.get("cost") or 0 for w in state.get("warmups") or []))
+
+
+def fresh_work():
+    """The working folder, emptied. One path for every run: the path is part
+    of what the CLI sends, so a new folder per run meant some ten thousand
+    tokens of prompt cache written again each time instead of read."""
+    shutil.rmtree(WORK, ignore_errors=True)
+    os.makedirs(WORK, exist_ok=True)
+    return WORK
+
+
+def warm_up(state, model, cfg, claude, archive_to, cap):
+    """One trivial call per model before its first run, in the same folder and
+    with the same flags. It writes the prompt-cache prefix every run of that
+    model shares, so both arms start equally warm instead of whichever goes
+    first paying for it — and so the hour of cache the plan offers is used."""
+    sc, root, sid = cfg["scenario"], fresh_work(), str(uuid.uuid4())
+    entry = {"model": model, "session_id": sid, "started": now_iso(),
+             "cost": 0.0, "tokens": 0, "status": "error"}
+    try:
+        ws = os.path.join(root, "w")
+        scenario.prepare(sc, ws, runner.guard_env(dict(os.environ), root))
+        cmd = runner.command(claude, model, sid, sc["allowed_tools"],
+                             cfg["denied_tools"], cap, cfg["effort"],
+                             cfg["headless_note"])
+        code, out, err, _secs, timed_out = runner.execute(
+            cmd, WARMUP_PROMPT, ws,
+            runner.arm_env("off", cfg["level"], root, cfg.get("subagent_model", "")),
+            min(cfg["timeout"], 300))
+        transcript = runner.find_transcript(sid)
+        if transcript:
+            usage = runner.measure(transcript)
+            entry.update(cost=usage["cost"], tokens=usage["tokens"])
+            with contextlib.suppress(OSError):
+                runner.archive(transcript, archive_to)
+        entry["status"] = runner.classify(code, timed_out, runner.parse_result(out),
+                                          out, err)[0] or "ok"
+    except Exception as e:
+        entry["error"] = f"{type(e).__name__}: {e}"[:200]
+    state.setdefault("warmups", []).append(entry)
+    return entry
 
 
 def about(sc):
@@ -247,14 +311,39 @@ def about(sc):
             "conectores MCP, escrita só dentro da cópia"]
 
 
-def execute(run, attempt, sc, cfg, claude, archive_to, keep):
+def validity(run, cfg, usage):
+    """("", "") when a run may enter the comparison, else ("invalid", why).
+    Each run has to prove, from its own transcript, that it was on the side it
+    claims, that it ran the models that were asked for, and that nothing it
+    or a subagent of its did went through a fence."""
+    if not usage or usage.get("source") != "transcript":
+        return "", ""
+    if run["arm"] == "off" and usage["markers"]:
+        return "invalid", "o braço OFF recebeu texto do claude-token"
+    if run["arm"] == "on" and not usage["markers"]:
+        return "invalid", "o braço ON não recebeu nenhuma injeção do claude-token"
+    if not runner.ran_as_requested(run["model"], usage["models"]):
+        return "invalid", f"pediu {run['model']}, rodou " + ", ".join(usage["models"])
+    wanted = cfg.get("subagent_model")
+    if wanted and not runner.ran_as_requested(wanted, usage.get("sub_models") or []):
+        return "invalid", (f"pediu subagentes em {wanted}, rodaram em "
+                           + ", ".join(usage["sub_models"]))
+    violations = (usage.get("audit") or {}).get("violations")
+    if violations:
+        return "invalid", "furou uma proteção — " + violations[0]
+    return "", ""
+
+
+def execute(run, attempt, sc, cfg, claude, archive_to, keep, cap=0, plan_capped=False):
     """Run one attempt and fill it in. A run that fails is a result, not an
     exception: only Ctrl+C leaves this function by raising."""
     ws, sid, arm = attempt["workspace"], attempt["session_id"], run["arm"]
     index = transcript = ""
     usage = None
     try:
-        baseline = scenario.prepare(sc, ws)
+        # The user's --setup and --check run inside the same fences as the model.
+        fence = runner.guard_env(dict(os.environ), os.path.dirname(ws))
+        baseline = scenario.prepare(sc, ws, fence)
         if arm == "on" and cfg["level"] >= 2:
             # Level 2 points the model at line ranges, which needs an index of
             # this working copy. Built locally: no tokens.
@@ -262,28 +351,36 @@ def execute(run, attempt, sc, cfg, claude, archive_to, keep):
                 rag.cmd_index([ws])
             index = rag.index_path(ws)
         cmd = runner.command(claude, run["model"], sid, sc["allowed_tools"],
-                             cfg["denied_tools"], cfg["run_budget"], cfg["effort"])
+                             cfg["denied_tools"], cap, cfg["effort"],
+                             cfg["headless_note"])
         code, out, err, secs, timed_out = runner.execute(
             cmd, scenario.full_prompt(sc), ws,
-            runner.arm_env(arm, cfg["level"], os.path.dirname(ws)), cfg["timeout"])
+            runner.arm_env(arm, cfg["level"], os.path.dirname(ws),
+                           cfg.get("subagent_model", "")), cfg["timeout"])
         result = runner.parse_result(out)
         transcript = runner.find_transcript(sid)
         usage = runner.measure(transcript) if transcript else runner.usage_from_cli(result)
-        status, error = runner.classify(code, timed_out, result, out, err)
+        if transcript:
+            usage["audit"] = runner.audit(transcript)
+        status, error = runner.classify(code, timed_out, result, out, err, plan_capped)
         answer = str((result or {}).get("result") or "")
         checks = []
         if not status:
-            checks = scenario.run_checks(sc, ws, answer, baseline)
+            checks = scenario.run_checks(sc, ws, answer, baseline, fence)
             status = "ok" if all(c["ok"] for c in checks) else "check_failed"
             error = next((c["check"] + ": " + c["detail"] for c in checks if not c["ok"]), "")
-            # The comparison is only worth anything if the arms really differ
-            # by claude-token and nothing else, so each run proves its side.
-            if usage and usage["source"] == "transcript":
-                if arm == "off" and usage["markers"]:
-                    status, error = "invalid", "o braço OFF recebeu texto do claude-token"
-                elif arm == "on" and not usage["markers"]:
-                    status, error = "invalid", ("o braço ON não recebeu nenhuma "
-                                                "injeção do claude-token")
+            bad, why = validity(run, cfg, usage)
+            if bad:
+                status, error = bad, why
+            # What the run answered and changed is kept with the results, so a
+            # paid run can be verified again (--recheck) without the model.
+            with contextlib.suppress(OSError):
+                os.makedirs(archive_to, exist_ok=True)
+                with open(os.path.join(archive_to, sid + ".answer.txt"), "w",
+                          encoding="utf-8") as f:
+                    f.write(answer)
+                attempt["changes"] = scenario.save_changes(
+                    sc, ws, os.path.join(archive_to, sid + ".files"))
         attempt.update(status=status, error=error, seconds=round(secs, 1),
                        exit_code=code, usage=usage, checks=checks,
                        cli=runner.trim(result, answer))
@@ -307,7 +404,10 @@ def _line(attempt):
     u = attempt.get("usage") or {}
     bits = [STATUS_TEXT.get(attempt["status"], attempt["status"])]
     if u:
-        bits.append(f"{u['turns']} resp · {fmt_k(u['tokens'])} tok · ${u['cost']:.4f}")
+        sub = f" + {u['sub_turns']} de subagente" if u.get("sub_turns") else ""
+        bits.append(f"{u['turns']} resp{sub} · {fmt_k(u['tokens'])} tok · ${u['cost']:.4f}")
+        if u.get("models"):
+            bits.append(", ".join(u["models"]))
     if attempt.get("seconds"):
         bits.append(f"{attempt['seconds']:.0f}s")
     if attempt.get("error"):
@@ -333,30 +433,62 @@ def loop(path, state, guard, claude, keep):
     if not state["environment"].get("claude"):
         state["environment"]["claude"] = _claude_version(claude)
     owed = sum(r["status"] not in states.FINAL for r in state["runs"])
+    subs = (f" • subagentes em {cfg['subagent_model']}"
+            if cfg.get("subagent_model") else "")
     say(f"benchmark {state['id']}: {owed} de {total} execuções a fazer • modelo(s) "
-        f"{', '.join(cfg['model'])} • braço ON = nível {cfg['level']}")
+        f"{', '.join(cfg['model'])}{subs} • braço ON = nível {cfg['level']}")
     for text in about(sc):
         say(text)
     say(f"resultados (gravados a cada execução): {path}\n")
-    errors, width = 0, len(str(total))
+    errors, width, warmed, typical = 0, len(str(total)), set(), {}
     for n, run in enumerate(state["runs"], 1):
         if run["status"] in states.FINAL:
             continue
-        ok, reason = guard.check(spent(state))
+        # What a run of this task has been costing: the headroom has to fit it.
+        costs = [(a.get("usage") or {}).get("cost") or 0
+                 for r in state["runs"] for a in r["attempts"]
+                 if a.get("status") in states.FINAL]
+        if not costs:
+            # No run of this task has finished yet, so go by what the other
+            # tasks in the folder cost. A run started on headroom that cannot
+            # pay for it is cut halfway, and what it spent is thrown away.
+            if run["model"] not in typical:
+                past = states.history(os.path.dirname(path), run["model"],
+                                      run.get("kind"), skip=path)
+                typical[run["model"]] = statistics.median(past) if past else 0
+            costs = [typical[run["model"]]]
+        ok, reason, budget = guard.check(spent(state), max([guards.MIN_BUDGET] + costs))
         state["guard"] = guard.snapshot()
         if not ok:
             return stop(path, state, reason, 3)
-        root = os.path.realpath(tempfile.mkdtemp(prefix=runner.WORKSPACE_PREFIX))
+        before = guard.reading
+        # The run's hard budget: the user's own cap or what the plan's ceiling
+        # leaves, whichever is smaller. The CLI enforces it.
+        caps = [c for c in (cfg["run_budget"], budget) if c]
+        cap = round(min(caps), 4) if caps else 0
+        plan_capped = bool(budget) and cap == round(budget, 4)
+        if cfg.get("warmup", True) and run["model"] not in warmed:
+            warmed.add(run["model"])
+            say(f"aquecendo o cache de {run['model']} ... ", end="")
+            entry = warm_up(state, run["model"], cfg, claude, _archive_dir(path), cap)
+            states.save(path, state)
+            say(f"{entry['status']} · ${entry['cost']:.4f}")
+            if entry["status"] == "limit":
+                return stop(path, state, "a conta atingiu o limite de uso ao "
+                            "aquecer o cache", 3)
+        root = fresh_work()
         attempt = {"session_id": str(uuid.uuid4()), "started": now_iso(),
                    "status": "running", "workspace": os.path.join(root, "w"),
-                   "plan": {k: v["pct"] for k, v in (guard.reading or {}).items()}}
+                   "budget": cap or None,
+                   "plan": {k: v["pct"] for k, v in (before or {}).items()}}
         run["attempts"].append(attempt)
         run["status"] = "running"
         states.save(path, state)    # on disk BEFORE the CLI starts spending
         say(f"[{n:>{width}}/{total}] {run['model']} · {run['arm']:<3} "
             f"#{run['rep']} ... ", end="")
         try:
-            execute(run, attempt, sc, cfg, claude, _archive_dir(path), keep)
+            execute(run, attempt, sc, cfg, claude, _archive_dir(path), keep,
+                    cap, plan_capped)
         except KeyboardInterrupt:
             attempt.update(status="interrupted", ended=now_iso(),
                            error="interrompida pelo usuário")
@@ -365,11 +497,17 @@ def loop(path, state, guard, claude, keep):
             say("interrompida")
             return stop(path, state, "interrompido (Ctrl+C)", 130)
         run["status"] = attempt["status"]
+        # Read the plan again: this is where the account's points-per-dollar
+        # rate is learned, for this benchmark and the next ones.
+        after = guard.learn(before, (attempt.get("usage") or {}).get("cost") or 0)
+        if after:
+            attempt["plan_after"] = {k: v["pct"] for k, v in after.items()}
+        state["guard"] = guard.snapshot()
         state["summary"] = summary.build(state)
         states.save(path, state)
         say(_line(attempt))
         if attempt["status"] == "limit":
-            return stop(path, state, "a conta atingiu o limite de uso — "
+            return stop(path, state, "sem folga para continuar — "
                         + attempt["error"][:160], 3)
         errors = errors + 1 if attempt["status"] == "error" else 0
         if errors >= 3:
@@ -393,6 +531,79 @@ def cmd_report(arg):
     return 0
 
 
+def cmd_recheck(args):
+    """Verify paid runs again without the model: rebuild each one's working
+    copy from the project plus what the run changed, and run the checks. For
+    when the check itself was wrong — a bad path, a rule that changed — and
+    paying for the runs a second time would be the only other way."""
+    path = os.path.abspath(args.recheck) if args.recheck else states.latest()
+    if not path:
+        raise ValueError("nenhum resultado em benchmark/results")
+    state = states.load(path)
+    cfg, sc = state["config"], state["config"]["scenario"]
+    for cmd in args.check:
+        if scenario.forbidden(cmd):
+            raise ValueError(f"--check {cmd!r} envolve {scenario.forbidden(cmd)}")
+    if args.check:
+        sc["check"] = ([c for c in sc["check"] if "run" not in c]
+                       + [{"run": cmd} for cmd in args.check])
+    if args.expect:
+        sc["check"] = ([c for c in sc["check"] if "answer" not in c]
+                       + [{"answer": pattern} for pattern in args.expect])
+    redone = 0
+    for run in state["runs"]:
+        att = run["attempts"][-1] if run["attempts"] else None
+        if not att or att.get("status") not in ("ok", "check_failed", "invalid"):
+            continue
+        usage = att.get("usage") or {}
+        transcript = usage.get("transcript") or ""
+        label = f"{run['model']} · {run['arm']} #{run['rep']}"
+        root = os.path.realpath(tempfile.mkdtemp(prefix=runner.WORKSPACE_PREFIX))
+        ws = os.path.join(root, "w")
+        try:
+            fence = runner.guard_env(dict(os.environ), root)
+            baseline = scenario.prepare(sc, ws, fence)
+            changes = att.get("changes") or {}
+            if changes and not changes.get("truncated"):
+                scenario.restore_changes(changes, ws)
+                source = "arquivos salvos da execução"
+            elif os.path.exists(transcript):
+                runner.replay_edits(transcript, att["workspace"], ws)
+                source = "edições registradas no transcript"
+            else:
+                say(f"{label}: sem o que reconstruir, mantida como estava")
+                continue
+            answer = (att.get("cli") or {}).get("answer") or ""
+            full = os.path.join(_archive_dir(path), att["session_id"] + ".answer.txt")
+            if os.path.exists(full):
+                with open(full, encoding="utf-8") as f:
+                    answer = f.read()
+            checks = scenario.run_checks(sc, ws, answer, baseline, fence)
+            status = "ok" if all(c["ok"] for c in checks) else "check_failed"
+            error = next((c["check"] + ": " + c["detail"] for c in checks if not c["ok"]), "")
+            if os.path.exists(transcript):
+                usage["audit"] = runner.audit(transcript)
+            bad, why = validity(run, cfg, usage)
+            if bad:
+                status, error = bad, why
+            was = att["status"]
+            att.update(status=status, error=error, checks=checks,
+                       rechecked={"at": now_iso(), "from": source, "was": was})
+            run["status"] = status
+            redone += 1
+            say(f"{label}: {STATUS_TEXT.get(was, was)} → {STATUS_TEXT.get(status, status)}"
+                f" (a partir de: {source})" + (f" · {error[:120]}" if error else ""))
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            say(f"{label}: não deu para reverificar — {e}")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    state["summary"] = summary.build(state)
+    states.save(path, state)
+    say(summary.render(state))
+    say(f"\n{redone} execução(ões) reverificada(s) sem chamar o modelo • {path}")
+    return 0
+
+
 def cmd_dry_run(state, guard):
     cfg = state["config"]
     for text in about(cfg["scenario"]):
@@ -407,8 +618,12 @@ def cmd_dry_run(state, guard):
     for key, label, _ in guards.WINDOWS:
         top = guard.ceilings.get(key)
         if key in now:
+            room = max((top - now[key]["pct"] - guards.RESOLUTION)
+                       / guard.rates[key] * guards.SAFETY, 0)
+            how = "medido nesta conta" if key in guard.measured else "padrão conservador"
             say(f"janela de {label}: {now[key]['pct']:.0f}% agora, teto {top:.0f}% "
-                f"(zera {guards.fmt_reset(now[key]['resets_at'])})")
+                f"(zera {guards.fmt_reset(now[key]['resets_at'])}) — folga de "
+                f"~US$ {room:.2f} a {guard.rates[key]:.1f} ponto(s) por dólar ({how})")
         else:
             say(f"janela de {label}: não consegui ler — o benchmark não rodaria")
     return 0
@@ -419,17 +634,30 @@ def main(argv=None, fetch_usage=None):
     try:
         if args.report is not None:
             return cmd_report(args.report)
+        if args.recheck is not None:
+            return cmd_recheck(args)
         if args.resume is not None:
             path, state = open_resume(args)
         else:
             state = new_state(args)
             path = states.path_for(state, args.out)
+            if not args.dry_run and not args.no_preflight:
+                # A check that cannot start would fail every paid run: find
+                # out now, on an untouched copy, for free.
+                root = tempfile.mkdtemp(prefix=runner.WORKSPACE_PREFIX)
+                try:
+                    for warning in scenario.preflight(
+                            state["config"]["scenario"],
+                            runner.guard_env(dict(os.environ), root)):
+                        say("aviso: " + warning)
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
     except ValueError as e:     # ScenarioError included
         say(f"erro: {e}")
         return 1
     cfg = state["config"]
     guard = guards.Guard({"five_hour": cfg["max_5h"], "seven_day": cfg["max_week"]},
-                         cfg["max_cost"], state.get("guard"), fetch_usage,
+                         cfg["max_cost"], os.path.dirname(path), fetch_usage,
                          cfg["plan_guard"])
     if args.dry_run:
         return cmd_dry_run(state, guard)
