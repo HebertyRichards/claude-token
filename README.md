@@ -95,17 +95,20 @@ sessão (36 resp): leitura 3.4M · saída 58.8k · custo ~$2.77 · 1 subagente(s
 - `ctx` — context fill against the window the harness reports for the session
   (200k or 1M; 200k only as a fallback); 🟢 <60%, 🟡 <85%, 🔴 above. The
   "context full, consider /compact" nudge uses the same window.
-- `cache🔥/🧊` — whether the prompt cache is being reused (cached input costs
-  2.5-10% of the input price, depending on the model). Flips to 🧊 once the
-  session has been idle past its cache TTL, or right after a compact. The TTL
+- `cache🔥/🧊` — whether the next turn reads the prompt cache (cached input
+  costs 2.5-10% of the input price, depending on the model): 🔥 while the last
+  response is younger than the cache TTL, including a response that had to
+  rewrite the cache, since that leaves it warm. Flips to 🧊 once the session
+  has been idle past the TTL, or right after a compact. The TTL
   is read from the session's own cache writes — 1 hour on a subscription, 5
   minutes otherwise — never assumed.
 - `cache🔥 até 15:42` — until when the next turn is still a cheap cache read.
   The cache is only worth having if the conversation is used before it goes.
-- `cache🧊 reler 135.2k ≈$1.08 → /compact ou conversa nova` — when the cache
-  has expired, what the next turn will write back and roughly cost, at the
-  write rate, the dearest there is. Above 30k tokens of context it recommends
-  `/compact` or a new conversation before continuing; below that, just go on.
+- `cache🧊 reler 135.2k ≈$1.08` — when the cache has expired, what the next
+  turn will write back and roughly cost, at the write rate, the dearest there
+  is. It is paid once: after that turn the cache is warm again. No advice
+  comes with it, because a `/compact` reads the whole conversation uncached
+  too; only a new conversation avoids the cost, and it drops the context.
 - `· 1 subagente(s) ~$0.04` — what the subagents spawned since the last
   compact cost. Their turns live in `<session>/subagents/`, not in the
   transcript, so they are shown apart from the session's own totals.
@@ -152,12 +155,13 @@ is worse than none:
   work is not a measurement of what was saved. The comparison lives in
   [`benchmark/`](benchmark/README.md), where it can be controlled: the same
   task, run with the optimizer off and on.
-- **Prices are not hardcoded.** They live in `~/.claude/claude-token-prices.json`
-  for you to edit, with the date you last verified them; after 90 days the
-  reports say so. There is no pricing endpoint to fetch them from. Rows the
-  repo gains later (a new model) are added to your file on the next run; rows
-  you already have are never overwritten — when one disagrees with a table the
-  repo verified more recently, the reports name it.
+- **One price table, in the repo.** Prices live in `common.py` (`PRICES`),
+  with the date they were last compared with Anthropic's; after 90 days the
+  reports say so. There is no pricing endpoint to fetch them from, so a change
+  is made there and reaches every machine with `git pull`. They used to be
+  copied to `~/.claude/claude-token-prices.json` for editing, and the copies
+  drifted: a price fixed on one machine stayed wrong on the other. That file
+  is no longer read; while it exists, the reports say so.
 - **An unpriced model is reported, never guessed.** Its tokens are counted and
   its cost is left out, with a warning naming the model — rather than billing
   it silently at some other model's rate. That holds between versions too: a
@@ -237,7 +241,6 @@ Inside Claude Code: `/token <anything above>`, e.g. `/token report`.
 
 ```
 claude-token-state.json    ON periods + current level
-claude-token-prices.json   the price table — yours to edit
 claude-token-rag/          one BM25 index per project
 claude-token-memory/       one note per compacted session (0600, holds your text)
 claude-token-sessions.json which sessions already got the lean rules

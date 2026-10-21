@@ -82,10 +82,10 @@ Como manter o cache quente:
 
 Use a conversa enquanto o cache está quente: a statusline mostra até que horas
 (cache🔥 até HH:MM). Depois que esfria, o próximo turno regrava o contexto
-inteiro a preço de gravação, o mais caro que existe:
-  - contexto grande: /compact ou conversa nova ANTES de continuar — a
-    statusline avisa (cache🧊 reler N ≈$X → /compact ou conversa nova)
-  - contexto pequeno: só continue, a regravação custa pouco
+inteiro a preço de gravação, o mais caro que existe, e o cache volta a ficar
+quente; a statusline mostra esse preço antes (cache🧊 reler N ≈$X).
+  - mesmo assunto: continue; o /compact não evita o custo, porque também lê
+    a conversa inteira sem cache
   - assunto novo: /clear, com cache quente ou frio
 """)
 

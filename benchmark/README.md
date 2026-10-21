@@ -120,7 +120,7 @@ run that does not, is marked `invalid` and left out of the comparison.
 ## How it is measured
 
 - **From the transcript**, with the functions `claude-token report` uses:
-  subagents included, deduped by message id, priced by your local table. The
+  subagents included, deduped by message id, priced by the repo's price table. The
   CLI's own `total_cost_usd` is stored beside it as a cross-check.
 - **Each response at its own model's rate.** A price row covers exactly one
   version: Opus 5.5 is never billed as Opus 5, and a subagent on another model

@@ -2,7 +2,7 @@
 
 Usage is read from the transcript the run leaves behind, with the same
 functions `claude-token report` uses: subagents included, deduped by message
-id, priced by the local table. The CLI's own total is stored next to it as a
+id, priced by the repo's price table. The CLI's own total is stored next to it as a
 cross-check, never mixed in."""
 import glob
 import json

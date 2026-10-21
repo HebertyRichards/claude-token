@@ -15,7 +15,6 @@ from usage import segment_usage, subagent_usage
 WEEKDAYS = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
 USAGE_CACHE = os.path.join(CLAUDE_DIR, "claude-token-usage-cache.json")
 USAGE_TTL = 120  # segundos entre consultas ao endpoint (statusline roda direto)
-COLD_ADVICE = 30_000  # tokens: acima disso, cache frio pede /compact ou conversa nova
 
 
 def _dot(pct):
@@ -100,6 +99,10 @@ def cmd_statusline():
     # Only what came after the last /compact counts: the boundary resets
     # everything here, and /clear starts a new transcript file anyway.
     entries, carried = segment_usage(transcript) if transcript else ([], 0)
+    # A turn the harness writes itself ("No response requested." after an
+    # interruption) carries zero usage: taken as the latest, it showed an
+    # empty context and a cold cache that nothing had touched.
+    entries = [e for e in entries if e[1] != "<synthetic>"]
     u = entries[-1][2] if entries else {}
     ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
            + u.get("cache_creation_input_tokens", 0)) or carried
@@ -111,18 +114,17 @@ def cmd_statusline():
         window = CONTEXT_WINDOW
     pct = ctx / window * 100
     dot ="🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
-    # Warm cache = last turn mostly reused cached input (2.5-10% of the price);
-    # cold = it re-wrote the cache (idle past the TTL, fresh session or
-    # post-compact).
-    warm = u.get("cache_read_input_tokens", 0) > u.get("cache_creation_input_tokens", 0)
-    # Past the TTL the next turn rewrites the cache no matter how warm the
-    # last one was — flip to cold by wall clock. The TTL is the one this
-    # session is actually getting (1h or 5min), read from its own writes.
+    # Warm = the next turn reads the cache: the last response is younger than
+    # the TTL. Whether that response read or rewrote the cache does not
+    # matter — a rewrite leaves it at its warmest, and judging by it showed
+    # cold right after the cache had been rebuilt. Cold: past the TTL, or no
+    # response yet since a /compact. The TTL is the one this session is
+    # actually getting (1h or 5min), read from its own writes.
     last = parse_ts(entries[-1][0]) if entries else None
     ttl = cache_ttl([e[2] for e in entries])
     expired = bool(last) and (datetime.now(timezone.utc) - last).total_seconds() > ttl
-    if expired:
-        warm = False
+    cached = u.get("cache_read_input_tokens", 0) or u.get("cache_creation_input_tokens", 0)
+    warm = bool(last and cached) and not expired
     cache = "cache🔥" if warm else "cache🧊"
     if expired and ctx:
         # What the expiry costs: the next turn writes the whole context to
@@ -133,10 +135,8 @@ def cmd_statusline():
         if p:
             write = p[0] * WRITE_1H if ttl == TTL_1H else p[3]
             cache += f" ≈${ctx * write / 1e6:.2f}"
-        if ctx >= COLD_ADVICE:
-            # A big context is cheaper to summarize or leave behind than to
-            # rewrite and then drag through every later turn.
-            cache += " → /compact ou conversa nova"
+        # Only the price, no advice: it is paid once and the cache is warm
+        # again, and a /compact would read the whole conversation uncached too.
     elif warm and last:
         # Until when the next turn is still a cheap cache read: a cache that
         # lasts an hour is only worth having if it is used before it goes.
