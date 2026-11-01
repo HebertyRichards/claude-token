@@ -117,6 +117,39 @@ sessão (36 resp): leitura 3.4M · saída 58.8k · custo ~$2.77 · 1 subagente(s
 - `/compact` resets the session counters (they count only what came after the
   last compact boundary). `/clear` starts a fresh transcript.
 
+**Skills (bugfix, feature, frontend, security, backend)** — five skills written
+for lean token use: `token-lean:bugfix` (proven cause, a test that fails without the fix),
+`token-lean:feature` (map what exists before coding, small verified stories)
+`token-lean:frontend` (extend the project's own design system, mobile
+first, WCAG AA), `token-lean:security` (access control, injection, auth,
+secrets, and logs that leak; findings never quote a secret's value) and
+`token-lean:backend` (the project's layers, no N+1, safe migrations, timeouts
+on outside calls). Each reads the project's `AGENTS.md`, `CONTEXT.md` and design
+files first and lets them win, and each has a read-only mode for "analyze"
+requests. They ship as a plugin (`token-lean`; Claude Code reserves names
+starting with `claude-`), so their names are prefixed and never overwrite, or
+get overwritten by, a skill with the same name. Bases and licenses:
+`plugin/THIRD_PARTY.md`.
+
+**Skill arbitration, per project** — when another installed skill does the
+same job (e.g. `red-green-proof` next to `token-lean:bugfix`), the first call
+to either one in a session is stopped once and Claude asks you which should
+lead that kind of work **in this project**: projects differ in business rules
+and layout. The answer is stored per project (`claude-token skills`), and from
+then on prompts of that kind get a one-line pointer to your choice. It is
+built not to get in the way:
+
+- it only steps in where a `token-lean` skill competes; any other skill is
+  never touched;
+- competitors are found by name and by the first sentence of the description
+  (what the skill *is*), not by every use it mentions, and skills about
+  skills are left out;
+- a skill you name yourself (`$red-green-proof`, `/token-lean:bugfix`) passes;
+- it fails open: the second call in a session always passes, so a session
+  that cannot ask (`claude -p`) or a skill doing a different job is never
+  blocked;
+- an existing status line from another tool is kept, not replaced.
+
 **Reports** — `report` gives straight totals from the transcripts, subagents
 included, with the measured cost per response in a subagent next to the main
 thread's. `cache` shows prompt cache hit rate, cold turns and what they cost
@@ -213,8 +246,11 @@ chmod +x claude-token
 ```
 
 `on` registers the hooks and statusline in `~/.claude/settings.json` (a backup
-is created first), installs the `/token` slash command and a
-`~/.local/bin/claude-token` symlink. `off` removes it all.
+is created first; a status line from another tool is kept), installs the
+`/token` slash command, a `~/.local/bin/claude-token` symlink and the
+`token-lean` plugin with the skills (through `claude plugin`, from this
+folder's `.claude-plugin/marketplace.json`). `off` removes it all. After
+editing a skill, run `claude plugin update token-lean@token-lean`.
 
 ## Commands
 
@@ -230,10 +266,11 @@ index  [path]          build the RAG index for a project (rerun after big change
 search <query>         BM25 search over the indexed project
 toon   [file]          compact JSON/XML/HTML/docx/logs before pasting (also stdin)
 tips                   spot token-wasting config
+skills [prefer G S|reset [G]]  which skill leads bugfix/feature/frontend here
 ```
 
 Internal, called by Claude Code: `hook` (UserPromptSubmit), `posttool`
-(PostToolUse), `statusline`.
+(PostToolUse), `skillguard` (PreToolUse on Skill), `statusline`.
 
 Inside Claude Code: `/token <anything above>`, e.g. `/token report`.
 
@@ -245,6 +282,7 @@ claude-token-rag/          one BM25 index per project
 claude-token-memory/       one note per compacted session (0600, holds your text)
 claude-token-sessions.json which sessions already got the lean rules
 claude-token-window.json   context window per session, as the statusline saw it
+claude-token-skills.json   skill choice per project + who was asked this session
 commands/token.md          the /token slash command
 settings.json.bak-claude-token   backup taken on first `on`
 ```

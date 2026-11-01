@@ -13,7 +13,8 @@ Comandos:
   recall <consulta>    acha em quais sessões passadas um assunto aparece
   toon [arquivo]       compacta JSON/XML/HTML/logs/docx antes de colar no prompt
   tips                 aponta desperdícios de configuração
-  hook | statusline | posttool     interno, chamado pelo Claude Code
+  skills [prefer G S | reset [G]]   qual skill lidera bugfix/feature/frontend neste projeto
+  hook | statusline | posttool | skillguard   interno, chamado pelo Claude Code
 """
 import os
 import sys
@@ -37,6 +38,7 @@ from memory import cmd_memory
 from rag import cmd_index, cmd_search
 from recall import cmd_recall, cmd_sessions
 from report import cmd_cache, cmd_report, cmd_tips
+from skills import cmd_skillguard, cmd_skills
 from statusline import cmd_statusline
 from toggle import cmd_level, cmd_off, cmd_on, cmd_status
 from toon import cmd_toon
@@ -47,7 +49,8 @@ def main():
     fn = {
         "on": cmd_on, "off": cmd_off, "status": cmd_status,
         "hook": cmd_hook, "statusline": cmd_statusline, "tips": cmd_tips,
-        "posttool": cmd_posttool,
+        "posttool": cmd_posttool, "skillguard": cmd_skillguard,
+        "skills": lambda: cmd_skills(sys.argv[2:]),
         "memory": lambda: cmd_memory(sys.argv[2:]),
         "level": lambda: cmd_level(sys.argv[2:]),
         "report": lambda: cmd_report(sys.argv[2:]),

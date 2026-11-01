@@ -1,0 +1,14 @@
+{
+  "name": "token-lean",
+  "owner": {
+    "name": "HebertyRichards"
+  },
+  "plugins": [
+    {
+      "name": "token-lean",
+      "source": "./plugin",
+      "description": "Token-lean skills for bug fixes, features and frontend work"
+    }
+  ],
+  "description": "Skills from claude-token: bug fixes, features and frontend with lean token use"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "token-lean",
+  "version": "0.2.0",
+  "description": "Token-lean skills for bug fixes, features and frontend work",
+  "author": { "name": "HebertyRichards" },
+  "license": "MIT"
+}

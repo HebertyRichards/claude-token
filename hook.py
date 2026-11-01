@@ -13,6 +13,7 @@ from common import GUARD_ENV, level, window_for
 from lean import lean_note
 from memory import compact_pointer
 from rag import hook_hits as rag_hits
+from skills import routing_note
 from usage import tail_usage
 
 # Prompts that are plain questions get routed: concise-answer directive and a
@@ -72,6 +73,11 @@ def cmd_hook():
     rules = lean_note(cwd, data.get("session_id"), building)
     if rules:
         notes.append(rules)
+
+    # The skill the user chose for this kind of task in this project, if any.
+    route = routing_note(cwd, prompt)
+    if route:
+        notes.append(route)
 
     # A /compact just emptied the context. The transcript kept the dropped
     # turns, so say so — in a pointer, not the content: what enters the

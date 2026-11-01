@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import subprocess
 
 from common import (CLAUDE_DIR, COMMAND, DEFAULT_LEVEL, ENTRY, HOME, LEVELS, MARKER,
                     SETTINGS, STATE, is_on, level, load_json, load_state,
@@ -26,12 +27,22 @@ def cmd_on():
     else:
         hooks.pop("SessionEnd", None)
 
-    for event, sub in (("UserPromptSubmit", "hook"), ("PostToolUse", "posttool")):
+    for event, sub, matcher in (("UserPromptSubmit", "hook", None),
+                                ("PostToolUse", "posttool", None),
+                                ("PreToolUse", "skillguard", "Skill")):
         entries = hooks.setdefault(event, [])
         if not any(MARKER in json.dumps(h) for h in entries):
-            entries.append(
-                {"hooks": [{"type": "command", "command": f"{COMMAND} {sub}"}]})
-    settings["statusLine"] = {"type": "command", "command": f"{COMMAND} statusline"}
+            entry = {"hooks": [{"type": "command", "command": f"{COMMAND} {sub}"}]}
+            if matcher:
+                entry = {"matcher": matcher, **entry}
+            entries.append(entry)
+    # Someone else's status line (a company one, another tool) stays: replacing
+    # it silently is exactly the kind of conflict this tool must not cause.
+    current = settings.get("statusLine")
+    if not current or MARKER in json.dumps(current):
+        settings["statusLine"] = {"type": "command", "command": f"{COMMAND} statusline"}
+    else:
+        print("AVISO: já existe outra statusline em settings.json; mantive a dela.")
     save_json(SETTINGS, settings)
 
     st = load_state()
@@ -43,6 +54,7 @@ def cmd_on():
 
     install_slash_command()
     install_symlink()
+    install_plugin()
 
     print(f"LIGADO no nível {level()} — {LEVELS[level()]}")
     print("Troque com `claude-token level N` (ou /token level N).")
@@ -52,7 +64,7 @@ def cmd_on():
 def cmd_off():
     settings = load_json(SETTINGS, {})
     hooks = settings.get("hooks", {})
-    for event in ("UserPromptSubmit", "SessionEnd", "PostToolUse"):
+    for event in ("UserPromptSubmit", "SessionEnd", "PostToolUse", "PreToolUse"):
         kept = [h for h in hooks.get(event, []) if MARKER not in json.dumps(h)]
         if kept:
             hooks[event] = kept
@@ -69,7 +81,8 @@ def cmd_off():
     if ps and ps[-1].get("end") is None:
         ps[-1]["end"] = now_iso()
         save_json(STATE, st)
-    print("DESLIGADO — hook e statusline removidos.")
+    uninstall_plugin()
+    print("DESLIGADO — hooks, statusline e skills do plugin removidos.")
 
 
 def cmd_status():
@@ -112,8 +125,8 @@ def install_slash_command():
     with open(os.path.join(cmd_dir, "token.md"), "w", encoding="utf-8") as f:
         f.write(
             "---\n"
-            "description: Economia de tokens — status, level, memory, sessions, report, cache, index, recall, toon, tips, on/off\n"
-            "argument-hint: [status|level|memory|sessions|recall|report|cache|index|search|toon|tips|on|off]\n"
+            "description: Economia de tokens — status, level, memory, sessions, report, cache, index, recall, toon, tips, skills, on/off\n"
+            "argument-hint: [status|level|memory|sessions|recall|report|cache|index|search|toon|tips|skills|on|off]\n"
             "allowed-tools: Bash(claude-token:*)\n"
             "---\n\n"
             "!`claude-token $ARGUMENTS`\n\n"
@@ -141,3 +154,39 @@ def install_symlink():
             os.symlink(ENTRY, link)
         except OSError:
             pass
+
+
+PLUGIN_ID = "token-lean@token-lean"
+
+
+def _claude(*args):
+    """Runs `claude plugin ...`; (ok, output). Never raises."""
+    try:
+        r = subprocess.run(["claude", "plugin", *args], capture_output=True,
+                           text=True, timeout=180)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+
+
+def install_plugin():
+    # The skills ship as a plugin so their names come prefixed
+    # (token-lean:bugfix) and can never overwrite, or be overwritten by,
+    # a skill with the same name in ~/.claude/skills or in a project.
+    repo = os.path.dirname(ENTRY)
+    ok, out = _claude("marketplace", "add", repo)
+    if not ok and "already" not in out.lower():
+        print(f"AVISO: não registrei o marketplace local do plugin: {out[-300:]}")
+        return
+    ok, out = _claude("install", PLUGIN_ID)
+    if ok and "already" in out.lower():
+        ok, out = _claude("update", PLUGIN_ID)
+    if ok:
+        print("skills instaladas: token-lean:bugfix, :feature, :frontend, :security, :backend")
+    else:
+        print(f"AVISO: o plugin com as skills não instalou: {out[-300:]}")
+
+
+def uninstall_plugin():
+    _claude("uninstall", PLUGIN_ID)
+    _claude("marketplace", "remove", "token-lean")
