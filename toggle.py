@@ -55,6 +55,7 @@ def cmd_on():
     install_slash_command()
     install_symlink()
     install_plugin()
+    t3_meters(True)
 
     print(f"LIGADO no nível {level()} — {LEVELS[level()]}")
     print("Troque com `claude-token level N` (ou /token level N).")
@@ -82,10 +83,17 @@ def cmd_off():
         ps[-1]["end"] = now_iso()
         save_json(STATE, st)
     uninstall_plugin()
+    t3_meters(False)
     print("DESLIGADO — hooks, statusline e skills do plugin removidos.")
 
 
 def cmd_status():
+    # Inside a session (/token), the statusline first: T3 Code and other SDK
+    # hosts never draw it, so this is the only place it shows there.
+    from statusline import current_lines
+    lines = current_lines()
+    if lines:
+        print("\n".join(lines) + "\n")
     print("LIGADO" if is_on() else "DESLIGADO")
     print(f"nível {level()}: {LEVELS[level()]}")
     ps = load_state().get("periods", [])
@@ -190,3 +198,43 @@ def install_plugin():
 def uninstall_plugin():
     _claude("uninstall", PLUGIN_ID)
     _claude("marketplace", "remove", "token-lean")
+
+
+# T3 Code runs Claude Code through the SDK and never draws the statusline. It
+# has a context meter and per-thread usage of its own, both off by default:
+# `on` turns them on, `off` turns back off only the ones `on` turned on.
+T3_SETTINGS = os.path.join(HOME, ".t3", "userdata", "client-settings.json")
+T3_METERS = ("contextWindowMeterEnabled", "threadDetailsUsageEnabled")
+
+
+def t3_meters(enable):
+    t3 = load_json(T3_SETTINGS, None)
+    if not isinstance(t3, dict):
+        return  # no T3 Code on this machine
+    st = load_state()
+    if enable:
+        flipped = [k for k in T3_METERS if t3.get(k) is not True]
+        if not flipped:
+            return
+        for k in flipped:
+            t3[k] = True
+        st["t3_meters"] = sorted(set(st.get("t3_meters", [])) | set(flipped))
+        print("T3 Code: medidor de contexto e uso por thread ligados "
+              "(a statusline não aparece lá; /token status mostra as mesmas linhas).")
+    else:
+        flipped = [k for k in st.pop("t3_meters", []) if t3.get(k) is True]
+        if not flipped:
+            save_json(STATE, st)
+            return
+        for k in flipped:
+            t3[k] = False
+    tmp = T3_SETTINGS + ".tmp"
+    try:
+        # T3 keeps this file compact, on one line: written the same way.
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(t3, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, T3_SETTINGS)
+    except OSError as e:
+        print(f"AVISO: não consegui mudar as configurações do T3 Code: {e}")
+        return
+    save_json(STATE, st)

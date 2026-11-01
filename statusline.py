@@ -6,9 +6,10 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-from common import (CLAUDE_DIR, CONTEXT_WINDOW, TTL_1H, WRITE_1H, cache_ttl,
+from common import (CLAUDE_DIR, PROJECTS, TTL_1H, WRITE_1H, cache_ttl,
                     fetch_plan_usage, fmt_k, level, load_json, load_state,
-                    parse_ts, price_for, remember_window, save_json, turn_cost)
+                    parse_ts, price_for, remember_window, save_json, turn_cost,
+                    window_for)
 from usage import segment_usage, subagent_usage
 
 
@@ -94,6 +95,13 @@ def cmd_statusline():
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, OSError):
         data = {}
+    print("\n".join(render(data)))
+
+
+def render(data):
+    """The statusline's lines for one session. `data` is what Claude Code
+    hands the statusline; /token status builds a smaller one where no
+    statusline runs (T3 Code), with only the session id and transcript."""
     model = (data.get("model") or {}).get("display_name", "?")
     transcript = data.get("transcript_path", "")
     # Only what came after the last /compact counts: the boundary resets
@@ -111,7 +119,7 @@ def cmd_statusline():
     if isinstance(window, int) and window > 0:
         remember_window(data.get("session_id"), window)
     else:
-        window = CONTEXT_WINDOW
+        window = window_for(data.get("session_id"), entries[-1][1] if entries else None)
     pct = ctx / window * 100
     dot ="🟢" if pct < 60 else "🟡" if pct < 85 else "🔴"
     # Warm = the next turn reads the cache: the last response is younger than
@@ -185,14 +193,38 @@ def cmd_statusline():
             else:
                 sub_cost += c
 
-    print(f"{eco} | {model} | ctx {fmt_k(ctx)}/{_fmt_window(window)} ({pct:.0f}%) {dot} | {cache}")
+    if model == "?" and entries:
+        model = entries[-1][1]
+    lines = [f"{eco} | {model} | ctx {fmt_k(ctx)}/{_fmt_window(window)} ({pct:.0f}%) {dot} | {cache}"]
     # The plan window is the headline: on a subscription it, not the dollar
     # estimate, is what actually runs out.
     usage = plan_usage_line(data.get("rate_limits") or {})
     if usage:
-        print(usage)
+        lines.append(usage)
     tail = f" · {agents} subagente(s) ~${sub_cost:.2f}" if agents else ""
     if unpriced:
         tail += f" · {unpriced} turno(s) sem preço"
-    print(f"sessão ({turns} resp): leitura {fmt_k(read_tok)} · saída "
-          f"{fmt_k(out_tok)} · custo ~${cost:.2f}{tail}")
+    lines.append(f"sessão ({turns} resp): leitura {fmt_k(read_tok)} · saída "
+                 f"{fmt_k(out_tok)} · custo ~${cost:.2f}{tail}")
+    return lines
+
+
+def session_transcript(session_id):
+    """Transcript file of a session, found by its id under ~/.claude/projects."""
+    if not session_id or not os.path.isdir(PROJECTS):
+        return ""
+    name = session_id + ".jsonl"
+    for d in os.listdir(PROJECTS):
+        path = os.path.join(PROJECTS, d, name)
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def current_lines():
+    """The statusline for the session this command runs inside, or [].
+    /token runs it through Bash, which inherits the session id: that is how
+    T3 Code, which draws no statusline, still gets to see one."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    path = session_transcript(sid)
+    return render({"session_id": sid, "transcript_path": path}) if path else []

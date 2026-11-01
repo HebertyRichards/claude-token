@@ -40,8 +40,14 @@ replies are quoted and cut at 400 chars, never rephrased. The note's labels
 are in English (its reader is the model); what it quotes stays in your
 language.
 
-**RAG (BM25) search** — `index` builds a local lexical index of the project
-(40-line chunks, camelCase/snake_case aware). With an index present, each
+**RAG (BM25) search** — a local lexical index of the project (40-line
+chunks, camelCase/snake_case aware), kept in `~/.claude`, never in the project.
+It needs no setup: inside a git repository the prompt hook builds it in the
+background, and rebuilds it when git sees a change or after two hours, so the
+pointers start on the next prompt (under a second on a few hundred files;
+never for the home folder, at most 20,000 files). `search` builds it on the
+spot when it is missing, and the skills use `search` to find code before
+reading it. Outside git, run `claude-token index <folder>`. Each
 prompt gets the top matching `file:start-end` ranges injected, so Claude reads
 snippets instead of dumping whole files into context. Offline, no embeddings.
 Logic ranks first: code that matches comes before any comment, docstring,
@@ -50,8 +56,7 @@ And it stays silent more often than it speaks, because a pointer costs tokens
 on every later turn and a wrong one sends the model to the wrong file: nothing
 is injected when the best match is not code, when it shares a single word with
 the request, or when the request already names a file small enough to be read
-whole. Overlapping ranges of one file are merged into one pointer. Rebuild the index (`claude-token
-index`) to get this ordering on a project indexed before.
+whole. Overlapping ranges of one file are merged into one pointer.
 
 **Session lookup by id** — `sessions` lists past conversations, `recall
 <query>` finds which ones mention something, `memory <id>` prints what was
@@ -84,7 +89,11 @@ Stats go to stderr so stdout pipes clean (`claude-token toon data.json | xclip
 -selection c`). This has to happen **before** pasting: a hook can add context
 but cannot rewrite what you already pasted.
 
-**Statusline** — live in the terminal, short lines that fit small screens:
+**Statusline** — live in the terminal, short lines that fit small screens.
+T3 Code and other hosts that run Claude Code through the SDK never draw it:
+there `/token status` prints the same lines for the current session, and `on`
+turns on T3 Code's own context meter and per-thread usage (`off` turns back
+off only what `on` turned on).
 
 ```
 ECO✅ nv2 (/token level N) | Opus 5.5 | ctx 150.6k/1M (15%) 🟢 | cache🔥
@@ -92,9 +101,10 @@ uso do plano: 5h 39% 🟢 (reseta 02:20) · semana 14% 🟢 (reseta seg 18:00)
 sessão (36 resp): leitura 3.4M · saída 58.8k · custo ~$2.77 · 1 subagente(s) ~$0.04
 ```
 
-- `ctx` — context fill against the window the harness reports for the session
-  (200k or 1M; 200k only as a fallback); 🟢 <60%, 🟡 <85%, 🔴 above. The
-  "context full, consider /compact" nudge uses the same window.
+- `ctx` — context fill against the window the harness reports for the session,
+  or, where it reports none, the window of the model (1M from Opus/Sonnet 4.6
+  on, 200k before); 🟢 <60%, 🟡 <85%, 🔴 above. The "context full, consider
+  /compact" nudge uses the same window.
 - `cache🔥/🧊` — whether the next turn reads the prompt cache (cached input
   costs 2.5-10% of the input price, depending on the model): 🔥 while the last
   response is younger than the cache TTL, including a response that had to
@@ -255,15 +265,15 @@ editing a skill, run `claude plugin update token-lean@token-lean`.
 ## Commands
 
 ```
-on / off / status      toggle the optimizer
+on / off / status      toggle the optimizer (status: also the statusline)
 level [0-2]            how much the harness injects (no arg: list the levels)
 memory [id]            what was done in a session (default: the current one)
 sessions [--days N]    list past sessions by id (default 14)
 recall <query>         which past sessions mention something (default 60 days)
 report [--days N]      tokens & cost for the period (default 30)
 cache  [--days N]      prompt cache efficiency and cold-turn waste (default 7)
-index  [path]          build the RAG index for a project (rerun after big changes)
-search <query>         BM25 search over the indexed project
+index  [path]          build the RAG index now (automatic inside git repos)
+search <query>         BM25 search over the project (builds the index if missing)
 toon   [file]          compact JSON/XML/HTML/docx/logs before pasting (also stdin)
 tips                   spot token-wasting config
 skills [prefer G S|reset [G]]  which skill leads bugfix/feature/frontend here

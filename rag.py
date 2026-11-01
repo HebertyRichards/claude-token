@@ -7,10 +7,12 @@ import json
 import math
 import os
 import re
+import subprocess
+import sys
 import time
 import unicodedata
 
-from common import CLAUDE_DIR, save_json
+from common import CLAUDE_DIR, ENTRY, HOME, save_json
 
 RAG_DIR = os.path.join(CLAUDE_DIR, "claude-token-rag")
 EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp",
@@ -27,6 +29,11 @@ SECRET_FILE = re.compile(
     r"([._-]|$)|^\.env", re.I)
 CHUNK, STEP = 40, 30          # lines per chunk / stride (10-line overlap)
 MAX_FILE = 1_000_000          # skip files bigger than ~1 MB
+MAX_FILES = 20_000            # a tree bigger than this is not one project
+# Automatic index: rebuilt in the background when git saw a change since the
+# last build, or when it is older than this (edits not yet staged).
+STALE_AFTER = 2 * 3600
+LOCK_TTL = 600                # a build that died leaves its lock this long
 WORD = re.compile(r"[^\W\d]\w+")
 CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # Words that say nothing about where the logic is. Left in, a request written
@@ -184,11 +191,76 @@ def find_index(cwd):
         d = parent
 
 
+def git_root(cwd):
+    """Top of the git repository holding cwd, or None outside one."""
+    d = os.path.abspath(cwd or os.getcwd())
+    while True:
+        if os.path.exists(os.path.join(d, ".git")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0
+
+
+def ensure_index(cwd):
+    """Builds or refreshes the project's index in the background, so RAG
+    works without anyone remembering `claude-token index`. Only inside a git
+    repository (never a whole home folder), never blocking the prompt: the
+    pointers start on the next prompt. The index lives in ~/.claude, not in
+    the project. Returns True when a build was started."""
+    root = git_root(cwd)
+    if not root or os.path.normcase(root) == os.path.normcase(HOME):
+        return False
+    path = index_path(root)
+    built = _mtime(path)
+    if built:
+        git = os.path.join(root, ".git")
+        changed = max(_mtime(os.path.join(git, n)) for n in ("index", "HEAD", "ORIG_HEAD"))
+        if changed <= built and time.time() - built < STALE_AFTER:
+            return False
+    lock = path + ".lock"
+    if time.time() - _mtime(lock) < LOCK_TTL:
+        return False  # a build is already running
+    try:
+        os.makedirs(RAG_DIR, exist_ok=True)
+        open(lock, "w").close()
+        kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL}
+        if os.name == "nt":
+            kw["creationflags"] = 0x00000008 | 0x00000200  # detached, own group
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen([sys.executable, ENTRY, "index", root], **kw)
+    except OSError:
+        return False
+    return True
+
+
 def cmd_index(argv):
-    root = os.path.abspath(argv[0]) if argv else os.getcwd()
+    root = os.path.abspath(argv[0]) if argv else (git_root(os.getcwd()) or os.getcwd())
+    try:
+        build_index(root)
+    finally:
+        try:
+            os.remove(index_path(root) + ".lock")
+        except OSError:
+            pass
+
+
+def build_index(root):
     chunks, df = [], {}
     files = 0
     for dirpath, dirnames, filenames in os.walk(root):
+        if files >= MAX_FILES:
+            break
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
                        and not d.startswith(".")]
         for name in filenames:
@@ -236,7 +308,7 @@ def cmd_index(argv):
     save_json(index_path(root), {"root": root, "built": time.time(),
                                  "df": df, "chunks": chunks})
     print(f"indexados {files} arquivos, {len(chunks)} trechos -> {index_path(root)}")
-    print("rode `claude-token index` de novo após mudanças grandes no código.")
+    print("dentro de um repositório git, o hook atualiza o índice sozinho quando o código muda.")
 
 
 def search(idx, query, top=3):
@@ -273,8 +345,13 @@ def cmd_search(argv):
         return
     idx = find_index(os.getcwd())
     if not idx:
-        print("sem índice para esta pasta — rode `claude-token index` primeiro.")
-        return
+        root = git_root(os.getcwd())
+        if not root:
+            print("sem índice para esta pasta e ela não é um repositório git — "
+                  "rode `claude-token index <pasta do projeto>`.")
+            return
+        cmd_index([root])  # one-off, well under a second on most projects
+        idx = find_index(os.getcwd())
     hits = search(idx, " ".join(argv), top=5)
     if not hits:
         print("nada encontrado.")

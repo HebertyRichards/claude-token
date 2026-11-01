@@ -68,6 +68,7 @@ Build mode: what changed, the sizes you looked at, lint and type check results, 
 
 ## Spend few tokens
 
+- Locate code first with `claude-token search <words from the task>`: it returns `file:start-end` ranges to read, and builds the project's index on first use. If it says there is no index (a folder outside git), run `claude-token index <project folder>` once; if `claude-token` is not installed, use `grep -rn`.
 - Find components with `grep -rn` / Glob, read them by range.
 - Never read `node_modules`, build output (`.next/`, `dist/`) or compiled CSS.
 - Do not paste whole config files back; quote the line that matters.

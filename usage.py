@@ -107,17 +107,21 @@ def segment_usage(path):
     return list(seen.values()), carried
 
 
+def _tail_lines(path, size):
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - size))
+            return f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+
+
 def tail_usage(path, size=131072):
     """Latest usage block, reading only the file tail (keeps hooks fast).
     If a /compact boundary is the most recent event, returns a synthetic
     usage holding only the tokens the summary carried over."""
-    try:
-        with open(path, "rb") as f:
-            f.seek(max(0, os.path.getsize(path) - size))
-            lines = f.read().decode("utf-8", "replace").splitlines()
-    except OSError:
-        return None
-    for line in reversed(lines):
+    lines = _tail_lines(path, size)
+    for line in reversed(lines or []):
         if '"compact_boundary"' in line:
             try:
                 meta = json.loads(line).get("compactMetadata") or {}
@@ -132,6 +136,21 @@ def tail_usage(path, size=131072):
             continue
         if u:
             return u
+    return None
+
+
+def tail_model(path, size=131072):
+    """Model id of the latest response, or None before the first one."""
+    for line in reversed(_tail_lines(path, size) or []):
+        if '"model"' not in line:
+            continue
+        try:
+            msg = json.loads(line).get("message")
+        except json.JSONDecodeError:
+            continue
+        model = msg.get("model") if isinstance(msg, dict) else None
+        if model and model != "<synthetic>":
+            return model
     return None
 
 

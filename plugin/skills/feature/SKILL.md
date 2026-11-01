@@ -64,6 +64,7 @@ Each story touches at most 3 files and has one checkable acceptance line. Securi
 
 ## 7. Spend few tokens
 
+- Locate code first with `claude-token search <words from the task>`: it returns `file:start-end` ranges to read, and builds the project's index on first use. If it says there is no index (a folder outside git), run `claude-token index <project folder>` once; if `claude-token` is not installed, use `grep -rn`.
 - Map with `grep -n`, `git grep` and the `[claude-token] RAG` hits; read files by range, not whole.
 - Do not re-read what you already read; keep the map as the memory.
 - Quiet test runners; long output to a file, read the tail.

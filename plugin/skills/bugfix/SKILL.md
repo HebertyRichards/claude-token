@@ -45,6 +45,7 @@ Cannot reach the code from a test (a closure in a huge factory, a route handler)
 
 - Quiet runners: `pytest -q --tb=short -x`, `vitest run --reporter=dot`, `jest --silent`, `phpunit --no-progress`. Run the one failing test first, the suite once at the end.
 - Logs and long output go to a file; read `tail -50` or `grep -n` the error, never the whole thing.
+- Locate code first with `claude-token search <words from the task>`: it returns `file:start-end` ranges to read, and builds the project's index on first use. If it says there is no index (a folder outside git), run `claude-token index <project folder>` once; if `claude-token` is not installed, use `grep -rn`.
 - Read files by range around the stack frame (`offset`/`limit`), not whole. If the prompt came with `[claude-token] RAG` hits, start there.
 - JSON, HTML or XML from an API: `| jq`, `| grep`, or `| claude-token toon`.
 - Do not re-read a file you already read unless it changed.

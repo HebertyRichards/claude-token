@@ -12,9 +12,9 @@ import sys
 from common import GUARD_ENV, level, window_for
 from lean import lean_note
 from memory import compact_pointer
-from rag import hook_hits as rag_hits
+from rag import ensure_index, hook_hits as rag_hits
 from skills import routing_note
-from usage import tail_usage
+from usage import tail_model, tail_usage
 
 # Prompts that are plain questions get routed: concise-answer directive and a
 # /model haiku tip, instead of a full agentic response.
@@ -43,7 +43,7 @@ def context_pct(transcript, session_id):
     u = tail_usage(transcript or "") or {}
     ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
            + u.get("cache_creation_input_tokens", 0))
-    return ctx / window_for(session_id) * 100
+    return ctx / window_for(session_id, tail_model(transcript or "")) * 100
 
 
 def cmd_hook():
@@ -87,6 +87,10 @@ def cmd_hook():
         notes.append(ptr)
 
     if lv >= 2:
+        # RAG with no setup: the index is built, and kept fresh, in the
+        # background. Before the early return below so even a question starts it.
+        ensure_index(cwd)
+
         # Context pruning nudge: history is the silent token leak — every
         # response pays for it. Above 70% fill, stop rereads and surface
         # /compact.
