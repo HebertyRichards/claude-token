@@ -28,7 +28,7 @@ In Diagnose only, you still run read-only commands (existing tests, linters, `gi
 
 ## 3. The loop
 
-1. **Collect the evidence.** The full error message, the stack trace, the failing input. Read the frames that belong to the project, not the framework's.
+1. **Collect the evidence.** The full error message, the stack trace, the failing input. Read the frames that belong to the project, not the framework's. No stack trace? **Find the code with `claude-token search <words from the task>` before any grep or Glob**: it returns the `file:start-end` ranges to read, and builds the project's index on first use. `[claude-token] RAG` pointers already in the prompt come from the same search: read those first. Outside git, run `claude-token index <project folder>` once; without `claude-token`, use `grep -rn`.
 2. **Label the cause.** For each candidate say which it is:
    - **Proven**: I read the value, ran the code or pulled the record.
    - **Inferred**: consistent with the evidence, not confirmed.
@@ -45,7 +45,6 @@ Cannot reach the code from a test (a closure in a huge factory, a route handler)
 
 - Quiet runners: `pytest -q --tb=short -x`, `vitest run --reporter=dot`, `jest --silent`, `phpunit --no-progress`. Run the one failing test first, the suite once at the end.
 - Logs and long output go to a file; read `tail -50` or `grep -n` the error, never the whole thing.
-- Locate code first with `claude-token search <words from the task>`: it returns `file:start-end` ranges to read, and builds the project's index on first use. If it says there is no index (a folder outside git), run `claude-token index <project folder>` once; if `claude-token` is not installed, use `grep -rn`.
 - Read files by range around the stack frame (`offset`/`limit`), not whole. If the prompt came with `[claude-token] RAG` hits, start there.
 - JSON, HTML or XML from an API: `| jq`, `| grep`, or `| claude-token toon`.
 - Do not re-read a file you already read unless it changed.

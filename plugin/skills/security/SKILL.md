@@ -30,7 +30,7 @@ Security work handles exactly what must not spread:
 
 ## 4. What to check
 
-Follow the data from the request to the database and back.
+Follow the data from the request to the database and back. **Find the code with `claude-token search <words from the task>` before any grep or Glob**: it returns the `file:start-end` ranges to read, and builds the project's index on first use. `[claude-token] RAG` pointers already in the prompt come from the same search: read those first. Outside git, run `claude-token index <project folder>` once; without `claude-token`, use `grep -rn`.
 
 | Area | Look for |
 |---|---|
@@ -66,6 +66,6 @@ End with what you did not check. Fix mode: the test that failed before the fix a
 
 ## Spend few tokens
 
-Locate code first with `claude-token search <words>`: it returns `file:start-end` ranges and builds the index on first use (outside git: run `claude-token index <project folder>` once; no `claude-token`: `grep -rn`). Then grep for the sinks (`execute(`, `raw(`, `innerHTML`, `redirect(`, `requests.get(`, `logger.`, `print(`) and read only around the hits. Do not read whole files you only need one route from.
+Grep for the sinks (`execute(`, `raw(`, `innerHTML`, `redirect(`, `requests.get(`, `logger.`, `print(`) and read only around the hits. Do not read whole files you only need one route from.
 
 Based on the dev-setup security rules and php-hostinger-security (dev-setup, MIT), and on security-pen-testing and senior-backend (alirezarezvani/claude-skills, MIT). See THIRD_PARTY.md.

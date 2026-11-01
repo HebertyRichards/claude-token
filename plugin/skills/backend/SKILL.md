@@ -11,6 +11,8 @@ The project already chose its layers, its database and its error format. Extend 
 
 Read `AGENTS.md` / `CLAUDE.md` (layers, commands, conventions), `CONTEXT.md` (business rules) and `docs/adr/`. They win over this skill. Find the existing pattern before writing: a similar route, its service, its repository, its schema, its tests. The project's `.claude/settings.json` deny rules and guard hooks stay in force; migrations and database resets are often blocked on purpose.
 
+**Find the code with `claude-token search <words from the task>` before any grep or Glob**: it returns the `file:start-end` ranges to read, and builds the project's index on first use. `[claude-token] RAG` pointers already in the prompt come from the same search: read those first. Outside git, run `claude-token index <project folder>` once; without `claude-token`, use `grep -rn`.
+
 ## 2. Pick the mode
 
 | The user said | Mode | What you may touch |
@@ -54,6 +56,6 @@ Build mode: files changed, tests and their result lines, what was not verified.
 
 ## Spend few tokens
 
-Locate code first with `claude-token search <words>`: it returns `file:start-end` ranges and builds the index on first use (outside git: run `claude-token index <project folder>` once; no `claude-token`: `grep -rn`). Find the pattern with `grep -n` and read by range. Quiet test runners; long output to a file, then the tail. Never dump query results or API bodies whole: `| jq`, `| head`, or `| claude-token toon`, and never if they may hold personal data.
+Find the pattern with `grep -n` and read by range. Quiet test runners; long output to a file, then the tail. Never dump query results or API bodies whole: `| jq`, `| head`, or `| claude-token toon`, and never if they may hold personal data.
 
 Based on senior-backend (alirezarezvani/claude-skills, MIT) and the dev-setup backend rules (MIT). See THIRD_PARTY.md.

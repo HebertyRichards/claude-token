@@ -35,6 +35,8 @@ Ask only what the code, `CONTEXT.md` and the request do not answer: the end stat
 
 ## 4. Map: what exists, verified
 
+**Find the code with `claude-token search <words from the task>` before any grep or Glob**: it returns the `file:start-end` ranges to read, and builds the project's index on first use. `[claude-token] RAG` pointers already in the prompt come from the same search: read those first. Outside git, run `claude-token index <project folder>` once; without `claude-token`, use `grep -rn`.
+
 ```
 [KNOWN]    app/routes/users.py:42 → get_current_user() → session, not request
 [KNOWN]    app/models/user.py:10 → User(tenant_id, role)
@@ -64,7 +66,6 @@ Each story touches at most 3 files and has one checkable acceptance line. Securi
 
 ## 7. Spend few tokens
 
-- Locate code first with `claude-token search <words from the task>`: it returns `file:start-end` ranges to read, and builds the project's index on first use. If it says there is no index (a folder outside git), run `claude-token index <project folder>` once; if `claude-token` is not installed, use `grep -rn`.
 - Map with `grep -n`, `git grep` and the `[claude-token] RAG` hits; read files by range, not whole.
 - Do not re-read what you already read; keep the map as the memory.
 - Quiet test runners; long output to a file, read the tail.

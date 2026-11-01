@@ -235,7 +235,9 @@ def ensure_index(cwd):
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL}
         if os.name == "nt":
-            kw["creationflags"] = 0x00000008 | 0x00000200  # detached, own group
+            # Windows only: these two constants exist only there.
+            kw["creationflags"] = (subprocess.DETACHED_PROCESS
+                                   | subprocess.CREATE_NEW_PROCESS_GROUP)
         else:
             kw["start_new_session"] = True
         subprocess.Popen([sys.executable, ENTRY, "index", root], **kw)

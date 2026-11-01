@@ -196,21 +196,22 @@ def remember_window(session_id, size):
         pass
 
 
-# Models whose context window is 1M: every model from Opus/Sonnet 4.6 on
-# (Anthropic's model table). Older ones (Opus 4.5, Sonnet 4.5, Haiku 4.5 and
-# before) have 200k, the fallback. Matched by version, like price_row().
-WINDOW_1M = ("fable-5", "mythos-5", "opus-5", "opus-4-8", "opus-4-7",
-             "opus-4-6", "sonnet-5", "sonnet-4-6", "haiku-5")
+# Models whose context window is 1M, one entry per version and matched like
+# price_row(): "opus-5" is Opus 5 only, so Opus 5.5 needs its own entry. A
+# version missing here falls back to 200k, the conservative side. Older
+# models (Opus 4.5, Sonnet 4.5, Haiku 4.5 and before) have 200k.
+WINDOW_1M = ("fable-5-1", "mythos-5-1", "fable-5", "mythos-5",
+             "opus-5-5", "opus-5", "opus-4-8", "opus-4-7", "opus-4-6",
+             "sonnet-5-5", "sonnet-5", "sonnet-4-6", "haiku-5-5")
 
 
 def model_window(model):
     """Context window from the model id, or None if the id says nothing.
     Needed where no statusline runs (T3 Code and other SDK hosts): there the
     harness never reports the window, and 200k called a 1M session full."""
-    m = (model or "").lower()
-    if "[1m]" in m:
+    if "[1m]" in (model or "").lower():
         return 1_000_000
-    return 1_000_000 if any(k in m for k in WINDOW_1M) else None
+    return 1_000_000 if any(same_version(model, k) for k in WINDOW_1M) else None
 
 
 def window_for(session_id, model=None):
