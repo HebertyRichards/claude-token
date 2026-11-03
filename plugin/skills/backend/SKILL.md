@@ -57,5 +57,3 @@ Build mode: files changed, tests and their result lines, what was not verified.
 ## Spend few tokens
 
 Find the pattern with `grep -n` and read by range. Quiet test runners; long output to a file, then the tail. Never dump query results or API bodies whole: `| jq`, `| head`, or `| claude-token toon`, and never if they may hold personal data.
-
-Based on senior-backend (alirezarezvani/claude-skills, MIT) and the dev-setup backend rules (MIT). See THIRD_PARTY.md.

@@ -190,7 +190,7 @@ def install_plugin():
     if ok and "already" in out.lower():
         ok, out = _claude("update", PLUGIN_ID)
     if ok:
-        print("skills instaladas: token-lean:bugfix, :feature, :frontend, :security, :backend")
+        print("skills instaladas: token-lean:bugfix, :feature, :frontend, :security, :backend, :tests, :infra, :cd")
     else:
         print(f"AVISO: o plugin com as skills não instalou: {out[-300:]}")
 

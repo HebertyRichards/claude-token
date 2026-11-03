@@ -74,5 +74,3 @@ Each story touches at most 3 files and has one checkable acceptance line. Securi
 ## Report
 
 The map (KNOWN/INFERRED/UNKNOWN), the stories with their status, the commands run with their result lines, and what is left or assumed.
-
-Based on zero-hallucination-coder (mehanshbarthwal-lab, MIT), feature-forge (Jeffallan/claude-skills, MIT), karpathy-coder and minimalist (alirezarezvani/claude-skills, MIT). See THIRD_PARTY.md.

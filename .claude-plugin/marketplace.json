@@ -7,7 +7,7 @@
     {
       "name": "token-lean",
       "source": "./plugin",
-      "description": "Token-lean skills for bug fixes, features and frontend work"
+      "description": "Token-lean skills for bug fixes, features, frontend, backend, security, tests, infra and deploy pipelines"
     }
   ],
   "description": "Skills from claude-token: bug fixes, features and frontend with lean token use"

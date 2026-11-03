@@ -5,7 +5,7 @@ description: Finds the proven cause of a bug from errors, stack traces and logs,
 
 # Bugfix
 
-A bug is fixed when a test **fails without the fix and passes with it**, and you watched both. A cause is known when you can point at the line, the record or the log entry that shows it.
+Done means one test ran **red on the old code and green on the new**, and you saw both runs. You know the cause only when you can show it: a line of code, a database row, a log entry.
 
 ## 1. The project's rules come first
 
@@ -30,11 +30,11 @@ In Diagnose only, you still run read-only commands (existing tests, linters, `gi
 
 1. **Collect the evidence.** The full error message, the stack trace, the failing input. Read the frames that belong to the project, not the framework's. No stack trace? **Find the code with `claude-token search <words from the task>` before any grep or Glob**: it returns the `file:start-end` ranges to read, and builds the project's index on first use. `[claude-token] RAG` pointers already in the prompt come from the same search: read those first. Outside git, run `claude-token index <project folder>` once; without `claude-token`, use `grep -rn`.
 2. **Label the cause.** For each candidate say which it is:
-   - **Proven**: I read the value, ran the code or pulled the record.
-   - **Inferred**: consistent with the evidence, not confirmed.
-   - **Unknown**: cannot tell from what is available; name the one artifact that would settle it.
-   Rank candidates and rule them out one at a time by reading code, not by reasoning about it. Regressions: `git bisect` against the last good tag.
-3. **Red.** Write the smallest test that fails on the current code, named after the defect (`returns 500 when the token expired`), asserting what a caller sees, not a mock call count. If it does not fail, you have not reproduced the bug: back to 2.
+   - **Proven**: you saw it: a printed value, a run, a row in the database.
+   - **Inferred**: it fits the evidence, but nobody has seen it yet.
+   - **Unknown**: the evidence at hand cannot decide; say which file, log or record would.
+   Check the likeliest first and discard each one by opening the code or running it; a story that sounds right is not a check. Regressions: `git bisect` against the last good tag.
+3. **Red.** Write the smallest test that fails on the current code, named after the defect (`returns 500 when the token expired`), asserting what a caller sees, not a mock call count. A test that passes on the current code does not show the bug: back to 2.
 4. **Fix.** The smallest change that turns it green. A large fix usually means the test was too broad.
 5. **Red again on purpose.** Revert only the fix, run the same test, see it fail, restore the fix. If it stayed green the test is decoration: rewrite it.
 6. **Everything.** The project's full suite and type check, quiet. A test that pinned the old behaviour is a finding: read its history before changing it.
@@ -71,5 +71,3 @@ Say what you got wrong earlier in the investigation, if anything. Never write "f
 - Leave `print`, `console.log`, `debugger` or temporary files behind.
 - Edit anything in Diagnose only mode.
 - Print or paste secrets, tokens or personal data from logs, `.env` or responses: quote the line number and the kind, masked.
-
-Based on red-green-proof (RooAGI, MIT) and debugging-wizard (Jeffallan/claude-skills, MIT). See THIRD_PARTY.md.

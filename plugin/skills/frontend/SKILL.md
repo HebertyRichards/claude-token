@@ -73,5 +73,3 @@ Build mode: what changed, the sizes you looked at, lint and type check results, 
 - Find components with `grep -rn` / Glob, read them by range.
 - Never read `node_modules`, build output (`.next/`, `dist/`) or compiled CSS.
 - Do not paste whole config files back; quote the line that matters.
-
-Based on ideas from impeccable (Paul Bakaus, Apache-2.0) and mobile-first-design (dev-setup). See THIRD_PARTY.md.

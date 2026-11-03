@@ -127,19 +127,25 @@ sessão (36 resp): leitura 3.4M · saída 58.8k · custo ~$2.77 · 1 subagente(s
 - `/compact` resets the session counters (they count only what came after the
   last compact boundary). `/clear` starts a fresh transcript.
 
-**Skills (bugfix, feature, frontend, security, backend)** — five skills written
+**Skills (bugfix, feature, frontend, security, backend, tests, infra, cd)** — eight skills written
 for lean token use: `token-lean:bugfix` (proven cause, a test that fails without the fix),
-`token-lean:feature` (map what exists before coding, small verified stories)
+`token-lean:feature` (map what exists before coding, small verified stories),
 `token-lean:frontend` (extend the project's own design system, mobile
 first, WCAG AA), `token-lean:security` (access control, injection, auth,
-secrets, and logs that leak; findings never quote a secret's value) and
+secrets, and logs that leak; findings never quote a secret's value),
 `token-lean:backend` (the project's layers, no N+1, safe migrations, timeouts
-on outside calls). Each reads the project's `AGENTS.md`, `CONTEXT.md` and design
-files first and lets them win, and each has a read-only mode for "analyze"
+on outside calls), `token-lean:tests` (cases from the business rules or
+the bug, every new test seen failing once, and a GitHub Actions workflow with
+read-only permissions and pinned actions), `token-lean:infra` (Docker,
+databases and Redis as services, cloud and Terraform, private by default, and
+no write to a live environment run by Claude) and `token-lean:cd` (deploy
+pipelines on GitHub, GitLab, Jenkins, AWS, Google Cloud, Azure, Kubernetes and
+shared hosting: one artifact promoted behind an approval, with a rollback
+written down; it prepares every deploy and never runs one).
+Each reads the project's `AGENTS.md`, `CONTEXT.md` and design files first and lets them win, and each has a read-only mode for "analyze"
 requests. They ship as a plugin (`token-lean`; Claude Code reserves names
 starting with `claude-`), so their names are prefixed and never overwrite, or
-get overwritten by, a skill with the same name. Bases and licenses:
-`plugin/THIRD_PARTY.md`.
+get overwritten by, a skill with the same name.
 
 **Skill arbitration, per project** — when another installed skill does the
 same job (e.g. `red-green-proof` next to `token-lean:bugfix`), the first call
@@ -276,7 +282,7 @@ index  [path]          build the RAG index now (automatic inside git repos)
 search <query>         BM25 search over the project (builds the index if missing)
 toon   [file]          compact JSON/XML/HTML/docx/logs before pasting (also stdin)
 tips                   spot token-wasting config
-skills [prefer G S|reset [G]]  which skill leads bugfix/feature/frontend here
+skills [prefer G S|reset [G]]  which skill leads bugfix/feature/frontend/tests/infra/cd here
 ```
 
 Internal, called by Claude Code: `hook` (UserPromptSubmit), `posttool`

@@ -67,5 +67,3 @@ End with what you did not check. Fix mode: the test that failed before the fix a
 ## Spend few tokens
 
 Grep for the sinks (`execute(`, `raw(`, `innerHTML`, `redirect(`, `requests.get(`, `logger.`, `print(`) and read only around the hits. Do not read whole files you only need one route from.
-
-Based on the dev-setup security rules and php-hostinger-security (dev-setup, MIT), and on security-pen-testing and senior-backend (alirezarezvani/claude-skills, MIT). See THIRD_PARTY.md.

@@ -20,7 +20,7 @@ from common import CLAUDE_DIR, level, load_json, now_iso, save_json
 PREFS = os.path.join(CLAUDE_DIR, "claude-token-skills.json")
 # Plugin names starting with "claude-" are reserved by Claude Code.
 PLUGIN = "token-lean"
-OWN = {g: f"{PLUGIN}:{g}" for g in ("bugfix", "feature", "frontend", "security", "backend")}
+OWN = {g: f"{PLUGIN}:{g}" for g in ("bugfix", "feature", "frontend", "security", "backend", "tests", "infra", "cd")}
 ALL = "all"
 
 # A skill joins a group at score >= 3. Name hit: 3. Description: only its
@@ -51,6 +51,22 @@ GROUPS = {
     "backend": (("backend", "back-end"),
                 ("backend", "back-end", "server-side", "microservices"),
                 ("rest api", "api", "endpoint", "database")),
+    "tests": (("tdd", "qa", "playwright", "cypress", "test-suite",
+               "webapp-testing", "unit-test", "e2e"),
+              ("unit test", "integration test", "end-to-end", "e2e test",
+               "test suite", "test coverage", "coverage gap", "test-driven",
+               "playwright", "cypress"),
+              ("tests", "testing", "coverage")),
+    "infra": (("devops", "docker", "terraform", "kubernetes", "helm", "aws-",
+               "azure-", "gcp-", "infra"),
+              ("infrastructure", "dockerfile", "docker-compose", "terraform",
+               "kubernetes", "infrastructure-as-code", "iac",
+               "cloud infrastructure", "devops"),
+              ("container", "cloud")),
+    "cd": (("ci-cd", "deploy", "release", "jenkins", "argocd", "gitops", "devops"),
+           ("continuous delivery", "continuous deployment", "deployment pipeline",
+            "ci/cd", "deploy", "rollback", "blue-green", "canary", "gitops"),
+           ("release", "pipeline")),
 }
 
 
@@ -69,6 +85,16 @@ PROMPT_WORDS = {
                  "csrf", "xss", "idor", "injection", "injeção", "pentest"),
     "backend": ("backend", "back-end", "endpoint", "rota", "api ", "query",
                 "migration", "migração", "service", "repositório"),
+    "tests": ("teste", "test", "tdd", "cobertura", "coverage", "playwright",
+              "pytest", "vitest", "jest", "github actions", "workflow",
+              "pipeline", " ci ", "cypress", "phpunit", "pest", "rspec",
+              "junit", "xunit", "nunit", "mockmvc", "testcontainers"),
+    "infra": ("infra", "docker", "compose", "terraform", "aws", "azure",
+              "gcp", "s3", "redis", "kubernetes", "k8s", "nginx",
+              "servidor", "server", "vps", "backup", "hostinger"),
+    "cd": ("deploy", "release", "rollback", "jenkins", "cloud run",
+           "cloud build", "codepipeline", "argo", "helm", "promover",
+           "produção", "producao", "staging", "homologação"),
 }
 
 
