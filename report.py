@@ -55,7 +55,7 @@ def cmd_cache(argv):
             inp += i; cr += r; cw += w; cw_1h += w1
             if w > r:  # cold turn: rebuilt the cache instead of reusing it
                 cold += 1
-                p = price_for(model, i + r + w)
+                p = price_for(model, i + r + w, u)
                 if p:  # extra vs reading the same tokens from a warm cache
                     waste += (w5 * p[3] + w1 * p[0] * WRITE_1H - w * p[2]) / 1e6
 
@@ -131,8 +131,10 @@ def cmd_report(argv):
     # place to see that a version is billed at its own rate and no other's.
     print("\npor modelo (linha de preço usada: entrada/saída por milhão):")
     for model, m in sorted(b["models"].items(), key=lambda kv: -kv[1]["cost"]):
-        p = price_for(model)
-        price = (f"{price_row(model)}: {p[0]:g}/{p[1]:g}" if p
+        fast = model.endswith(" (fast)")
+        p = price_for(model.removesuffix(" (fast)"),
+                      usage={"speed": "fast"} if fast else None)
+        price = (f"{price_row(model)}{' fast' if fast else ''}: {p[0]:g}/{p[1]:g}" if p
                  else "SEM PREÇO — fora do custo")
         who = " + ".join(x for x in (
             f"{m['turns']:,} resp" if m["turns"] else "",
@@ -170,7 +172,8 @@ def cmd_tips():
 Hábitos que mais economizam:
   - prompt específico vence o vago: vago infla a SAÍDA (5x mais cara)
   - /clear ao trocar de assunto; /compact em conversa longa ainda útil
-  - turnos seguidos pagam 2,5-10% da entrada em cache (5% no Opus 5.5);
+  - turnos seguidos pagam 2,5-10% da entrada em cache (5% no Opus/Sonnet 5.5,
+    2,5% no Fable/Mythos 5.1 e 5.2);
     parado além do TTL (1 h ou 5 min — `claude-token cache` diz qual) esfria
   - subagente em modelo menor barateia cada resposta, mas parte sem cache:
     vale para tarefa isolada, não para uma pergunta rápida

@@ -217,6 +217,13 @@ is worse than none:
   price row covers exactly one version, so Opus 5.5 can only be priced by the
   Opus 5.5 row, never by Opus 5's, in the main thread and in subagents alike.
   `report` lists which row priced each model.
+- **Each response is priced in the mode it ran in.** Fast mode (`usage.speed`
+  `"fast"`) costs 2x on Fable/Mythos 5.2, Opus 5.5, Opus 5 and Opus 4.8,
+  cache rates included, and gets its own line in `report`; a fast response on
+  any other version is reported as unpriced. US-only inference
+  (`inference_geo` `"us"`) adds 10%, and each web search adds $0.01. The
+  status line, `report` for any `--days`, `cache` and the benchmark all go
+  through the same function, so they never disagree.
 - **Compaction stats say what they are.** XML that only got minified is
   labeled as minified; a `.docx` reports the resulting token count instead of
   a percentage against zip bytes it was never comparable to.

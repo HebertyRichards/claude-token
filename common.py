@@ -32,8 +32,10 @@ STALE_DAYS = 90  # after this, the price table is reported as unverified
 # cache_write is the 5-minute-TTL rate (1.25x input). A 1-hour-TTL write is
 # WRITE_1H x input on every model, so it needs no column: turn_cost() applies
 # it to the tokens the transcript marks as 1h. Cache read is NOT a fixed share
-# of input any more: 0.1x on most models, 0.05x on Opus 5.5, 0.025x on
-# Fable/Mythos 5.1 — so every row spells it out.
+# of input any more: 0.1x on most models, 0.05x on Opus 5.5 and Sonnet 5.5,
+# 0.025x on Fable/Mythos 5.1 and 5.2 — so every row spells it out.
+# These are standard-speed, global-endpoint rates; FAST and US_ONLY below
+# scale them per response.
 #
 # One row per model VERSION, and a row prices only its own version: "opus-5"
 # is Opus 5 (claude-opus-5, claude-opus-5-20260301) and never Opus 5.5 — see
@@ -46,6 +48,7 @@ STALE_DAYS = 90  # after this, the price table is reported as unverified
 # copied to ~/.claude for editing there, and the copies drifted: a price fixed
 # on one machine stayed wrong on the other.
 PRICES = {
+    "fable-5-2": (8.0, 40.0, 0.20, 10.00), "mythos-5-2": (8.0, 40.0, 0.20, 10.00),
     "fable-5-1": (10.0, 50.0, 0.25, 12.50), "mythos-5-1": (10.0, 50.0, 0.25, 12.50),
     "fable-5": (10.0, 50.0, 1.00, 12.50), "mythos-5": (10.0, 50.0, 1.00, 12.50),
     "opus-5-5": (4.0, 20.0, 0.20, 5.00),
@@ -53,7 +56,7 @@ PRICES = {
     "opus-4-8": (5.0, 25.0, 0.50, 6.25), "opus-4-7": (5.0, 25.0, 0.50, 6.25),
     "opus-4-6": (5.0, 25.0, 0.50, 6.25), "opus-4-5": (5.0, 25.0, 0.50, 6.25),
     "opus-4-1": (15.0, 75.0, 1.50, 18.75), "opus-4": (15.0, 75.0, 1.50, 18.75),
-    "sonnet-5-5": (2.0, 10.0, 0.20, 2.50),
+    "sonnet-5-5": (2.0, 10.0, 0.10, 2.50),
     "sonnet-5": (2.0, 10.0, 0.20, 2.50),
     "sonnet-4-6": (3.0, 15.0, 0.30, 3.75), "sonnet-4-5": (3.0, 15.0, 0.30, 3.75),
     "sonnet-4": (3.0, 15.0, 0.30, 3.75),
@@ -68,11 +71,19 @@ PRICES = {
 # never match a model id by itself, so it only applies through price_for().
 BIG_PROMPT = 100_000
 BIG_SUFFIX = ">100k"
-PRICES_CHECKED = "2026-10-21"  # last compared with Anthropic's published prices
+PRICES_CHECKED = "2026-11-09"  # last compared with Anthropic's published prices
 # Which TTL a session gets is the harness's call (a subscription writes 1h,
 # and may fall back to 5m), so it is read per response, never assumed.
 WRITE_1H = 2.0
 TTL_5M, TTL_1H = 300, 3600
+# Fast mode (usage.speed "fast", or a Foundry id ending in -fast) bills the
+# same model at a multiple of all four rates; the cache multipliers apply on
+# top. Only these versions have it: a fast response on any other version is
+# reported as unpriced, not billed at standard speed.
+FAST = {"fable-5-2": 2.0, "mythos-5-2": 2.0, "opus-5-5": 2.0,
+        "opus-5": 2.0, "opus-4-8": 2.0}
+US_ONLY = 1.1   # inference_geo "us": every token rate, fast mode included
+WEB_SEARCH = 10.0 / 1000   # USD per search, on top of the tokens
 
 _unknown = set()   # model ids seen with no price entry
 
@@ -105,22 +116,38 @@ def same_version(model, name):
     return at >= 0 and not _LATER_VERSION.match(m, at + len(name))
 
 
-def price_for(model, prompt_tokens=0):
+def is_fast(model, u=None):
+    """Did this response run in fast mode?"""
+    return ((u or {}).get("speed") == "fast"
+            or (model or "").lower().endswith("-fast"))
+
+
+def price_for(model, prompt_tokens=0, usage=None):
     """(input, output, cache_read, cache_write) or None if the model is
     unknown. Never guesses: an unpriced model must be reported, not silently
     billed at some other model's rate.
 
     `prompt_tokens` is the size of that one request's prompt; it only matters
-    for models that have a BIG_SUFFIX row."""
+    for models that have a BIG_SUFFIX row. `usage` is that response's usage
+    block: its speed and inference_geo scale the rates."""
     m = (model or "").lower()
     key = price_row(model)
-    if key:
-        if prompt_tokens > BIG_PROMPT:
-            return PRICES.get(key + BIG_SUFFIX, PRICES[key])
-        return PRICES[key]
-    if m and m != "<synthetic>":
-        _unknown.add(m)
-    return None
+    if not key:
+        if m and m != "<synthetic>":
+            _unknown.add(m)
+        return None
+    p = PRICES[key]
+    if prompt_tokens > BIG_PROMPT:
+        p = PRICES.get(key + BIG_SUFFIX, p)
+    x = 1.0
+    if is_fast(model, usage):
+        if key not in FAST:
+            _unknown.add(f"{m} (fast)")
+            return None
+        x = FAST[key]
+    if str((usage or {}).get("inference_geo", "")).lower() == "us":
+        x *= US_ONLY
+    return tuple(r * x for r in p) if x != 1.0 else p
 
 
 def cache_writes(u):
@@ -140,12 +167,13 @@ def turn_cost(model, u):
         return 0.0
     inp, cr = u.get("input_tokens", 0), u.get("cache_read_input_tokens", 0)
     w5, w1 = cache_writes(u)
-    p = price_for(model, inp + cr + w5 + w1)
+    p = price_for(model, inp + cr + w5 + w1, u)
     if not p:
         return None
     pi, po, pcr, pcw = p
+    searches = (u.get("server_tool_use") or {}).get("web_search_requests") or 0
     return (inp * pi + u.get("output_tokens", 0) * po + cr * pcr
-            + w5 * pcw + w1 * pi * WRITE_1H) / 1e6
+            + w5 * pcw + w1 * pi * WRITE_1H) / 1e6 + searches * WEB_SEARCH
 
 
 def cache_ttl(usages):
@@ -200,7 +228,8 @@ def remember_window(session_id, size):
 # price_row(): "opus-5" is Opus 5 only, so Opus 5.5 needs its own entry. A
 # version missing here falls back to 200k, the conservative side. Older
 # models (Opus 4.5, Sonnet 4.5, Haiku 4.5 and before) have 200k.
-WINDOW_1M = ("fable-5-1", "mythos-5-1", "fable-5", "mythos-5",
+WINDOW_1M = ("fable-5-2", "mythos-5-2", "fable-5-1", "mythos-5-1",
+             "fable-5", "mythos-5",
              "opus-5-5", "opus-5", "opus-4-8", "opus-4-7", "opus-4-6",
              "sonnet-5-5", "sonnet-5", "sonnet-4-6", "haiku-5-5")
 

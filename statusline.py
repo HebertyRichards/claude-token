@@ -139,7 +139,7 @@ def render(data):
         # the cache again, at the write rate — the dearest there is. Shown
         # before the user types, which is the only moment it can be avoided.
         cache += f" reler {fmt_k(ctx)}"
-        p = price_for(entries[-1][1], ctx)
+        p = price_for(entries[-1][1], ctx, entries[-1][2])
         if p:
             write = p[0] * WRITE_1H if ttl == TTL_1H else p[3]
             cache += f" ≈${ctx * write / 1e6:.2f}"

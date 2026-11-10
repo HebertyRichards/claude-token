@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
-from common import PROJECTS, parse_ts, periods, turn_cost
+from common import PROJECTS, is_fast, parse_ts, periods, turn_cost
 
 
 def _read(path):
@@ -193,8 +193,10 @@ def collect(days):
                 cost = turn_cost(model, u) or 0.0
                 t["cost"] += cost
                 if model != "<synthetic>":
+                    # Fast mode costs a multiple of standard: its own line.
+                    label = f"{model} (fast)" if is_fast(model, u) else model
                     m = b["models"].setdefault(
-                        model, {"turns": 0, "sub_turns": 0, "cost": 0.0})
+                        label, {"turns": 0, "sub_turns": 0, "cost": 0.0})
                     m["sub_turns" if is_sub else "turns"] += 1
                     m["cost"] += cost
     return b
