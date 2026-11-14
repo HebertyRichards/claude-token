@@ -56,7 +56,12 @@ And it stays silent more often than it speaks, because a pointer costs tokens
 on every later turn and a wrong one sends the model to the wrong file: nothing
 is injected when the best match is not code, when it shares a single word with
 the request, or when the request already names a file small enough to be read
-whole. Overlapping ranges of one file are merged into one pointer.
+whole. A request also needs an anchor: an identifier (camelCase, snake_case,
+`` `quoted` ``) or the name of an indexed file, and the pointed-at code has to
+hold it — plain words are not a location. In requests about git, PRs, issues
+or running a command only an identifier counts. Files the session already
+read or edited since the last `/compact` are never pointed at again.
+Overlapping ranges of one file are merged into one pointer.
 
 **Session lookup by id** — `sessions` lists past conversations, `recall
 <query>` finds which ones mention something, `memory <id>` prints what was

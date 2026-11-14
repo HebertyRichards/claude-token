@@ -16,8 +16,9 @@ from rag import ensure_index, hook_hits as rag_hits
 from skills import routing_note
 from usage import tail_model, tail_usage
 
-# Prompts that are plain questions get routed: concise-answer directive and a
-# /model haiku tip, instead of a full agentic response.
+# Prompts that are plain questions get routed: concise-answer directive (and,
+# on a session's first prompt only, a /model haiku tip), instead of a full
+# agentic response.
 QUESTION_STARTS = (
     "o que", "oq ", "como", "qual", "quais", "por que", "porque", "pq ",
     "quando", "onde", "explique", "me explica", "é possível", "e possivel",
@@ -103,16 +104,18 @@ def cmd_hook():
 
         # Plain questions don't need an agentic answer — ask for a short reply.
         if is_simple_question(prompt, words):
-            notes.append(
-                "[claude-token] Simple question: answer briefly and directly, "
-                "no tools unless needed. If the session is questions-only, "
-                "mention that /model haiku is several times cheaper.")
+            note = ("[claude-token] Simple question: answer briefly and "
+                    "directly, no tools unless needed.")
+            if tail_model(data.get("transcript_path") or "") is None:
+                note += (" If the session will be questions-only, mention "
+                         "that /model haiku is several times cheaper.")
+            notes.append(note)
             print("\n".join(notes))
             return
 
         # RAG: point Claude at the relevant line ranges up front so it reads
         # snippets instead of dumping whole files into context.
-        hits = rag_hits(cwd, prompt)
+        hits = rag_hits(cwd, prompt, data.get("transcript_path"))
         if hits:
             notes.append(
                 "[claude-token] RAG — likely relevant spots, code before docs "

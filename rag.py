@@ -21,24 +21,16 @@ EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp",
         ".yaml", ".yml", ".toml"}
 SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", "build", "out",
              ".venv", "venv", "target", ".idea", ".vscode", "vendor"}
-# Never index secret-bearing files: the index itself only stores token
-# frequencies, but a hit would tell Claude to READ the file — putting the
-# secret into the context and the transcript.
 SECRET_FILE = re.compile(
     r"(^|[._-])(secrets?|credentials?|passwords?|passwd|apikeys?|api_keys?)"
     r"([._-]|$)|^\.env", re.I)
 CHUNK, STEP = 40, 30          # lines per chunk / stride (10-line overlap)
 MAX_FILE = 1_000_000          # skip files bigger than ~1 MB
 MAX_FILES = 20_000            # a tree bigger than this is not one project
-# Automatic index: rebuilt in the background when git saw a change since the
-# last build, or when it is older than this (edits not yet staged).
 STALE_AFTER = 2 * 3600
 LOCK_TTL = 600                # a build that died leaves its lock this long
 WORD = re.compile(r"[^\W\d]\w+")
 CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-# Words that say nothing about where the logic is. Left in, a request written
-# in plain Portuguese or English matches every comment and message written in
-# that language, and prose-heavy files win the ranking.
 STOP = frozenset("""
     the and for with that this from not are was has have you your its into when
     then than what which how does can que para com uma por nao dos das como mais
@@ -47,6 +39,13 @@ STOP = frozenset("""
     file files arquivo arquivos code codigo""".split())
 SMALL_FILE = 150    # lines: a file this size gets read whole anyway
 NAMED = re.compile(r"[\w./\\-]+\.[A-Za-z]{1,5}\b")
+BACKTICK = re.compile(r"`([^`\n]+)`")
+OPS = frozenset("""
+    git merge mergeia mergear mergeie rebase commit commita commitar push pull
+    branch branches stash cherry issue issues pr prs rode rodei roda rodar
+    execute executa executar run pnpm npm yarn composer docker monitore
+    monitora monitorar""".split())
+READ_TOOLS = {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit"}
 
 
 def _fold(text):
@@ -389,13 +388,82 @@ def _merge(hits):
     return out
 
 
-def hook_hits(cwd, prompt):
+def _stem(path):
+    return _fold(os.path.splitext(path.rsplit("/", 1)[-1])[0])
+
+
+def _anchors(idx, prompt):
+    """(tokens, stem) pairs a pointed-at chunk must match: identifiers the
+    request names, plus — outside git/command requests — plain words that are
+    the name of an indexed file ("o checkrate tá lento")."""
+    words = WORD.findall(prompt)
+    folded = {_fold(w) for w in words}
+    names = [w for w in words if CAMEL.search(w) or "_" in w]
+    if not folded & OPS:
+        # `pnpm dev` in a command request is a command, not a symbol.
+        names += BACKTICK.findall(prompt)
+    out = [(tuple(tokenize(w)), _fold(w)) for w in names if tokenize(w)]
+    if not folded & OPS:
+        stems = {_stem(c["f"]) for c in idx["chunks"]}
+        out += [((), w) for w in folded & stems if len(w) > 3 and w not in STOP]
+    return out
+
+
+def _matches(chunk, anchor):
+    toks, stem = anchor
+    return _stem(chunk["f"]) == stem or bool(toks) and all(
+        chunk["tf"].get(t) for t in toks)
+
+
+def session_reads(transcript):
+    """Files the main thread read or wrote since the last /compact: their text
+    is already in the context, so a pointer to them is a repeat. Subagent
+    reads (isSidechain) never reached this context."""
+    seen = set()
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"compact_boundary"' in line:
+                    seen.clear()
+                    continue
+                if '"tool_use"' not in line or '"file_path"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("isSidechain"):
+                    continue
+                for item in (d.get("message") or {}).get("content") or []:
+                    if (isinstance(item, dict) and item.get("type") == "tool_use"
+                            and item.get("name") in READ_TOOLS):
+                        fp = (item.get("input") or {}).get("file_path")
+                        if fp:
+                            seen.add(os.path.normcase(os.path.abspath(fp)))
+    except (OSError, TypeError):
+        pass
+    return seen
+
+
+def hook_hits(cwd, prompt, transcript=None):
     """Pointers worth injecting, or [] — and [] is the common, correct answer.
     Every pointer costs tokens on every later turn, and a wrong one sends the
     model reading the wrong file, so this only speaks when it has something."""
     idx = find_index(cwd)
     if not idx or not idx.get("chunks"):
         return []
+    hits = _hits(idx, prompt)
+    if hits and transcript:
+        # Only now pay for reading the transcript: most prompts end above.
+        read = session_reads(transcript)
+        root = idx.get("root") or cwd
+        hits = [h for h in hits if os.path.normcase(os.path.abspath(
+            os.path.join(root, h[1]["f"]))) not in read]
+    return [f"{f}:{s}-{e}" + (" (not code: may be stale)" if kind else "")
+            for f, s, e, kind in _merge(hits)]
+
+
+def _hits(idx, prompt):
     named = _named_files(idx, prompt)
     if named:
         # The user already said where to look. A small file is read whole, so
@@ -407,7 +475,13 @@ def hook_hits(cwd, prompt):
         hits = search(dict(idx, chunks=[c for c in idx["chunks"] if c["f"] in big]),
                       prompt, top=2) if big else []
     else:
-        hits = search(idx, prompt, top=3)
+        anchors = _anchors(idx, prompt)
+        if not anchors:
+            return []
+        # Ranked as usual (whole-index statistics), then only chunks that hold
+        # an anchor stay: a high score on common words is no location.
+        hits = [h for h in search(idx, prompt, top=50)
+                if any(_matches(h[1], a) for a in anchors)][:3]
         query = set(tokenize(prompt))
         # The best match has to be code, and to match more than one word of
         # the request: one shared word is a coincidence, not a location.
@@ -415,5 +489,4 @@ def hook_hits(cwd, prompt):
                 or sum(1 for t in query if hits[0][1]["tf"].get(t)) < min(2, len(query))):
             return []
         hits = [h for h in hits if not h[1].get("k") and h[0] >= hits[0][0] * 0.5]
-    return [f"{f}:{s}-{e}" + (" (not code: may be stale)" if kind else "")
-            for f, s, e, kind in _merge(hits)]
+    return hits
