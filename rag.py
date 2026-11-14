@@ -46,6 +46,8 @@ OPS = frozenset("""
     execute executa executar run pnpm npm yarn composer docker monitore
     monitora monitorar""".split())
 READ_TOOLS = {"Read", "Edit", "MultiEdit", "Write", "NotebookEdit"}
+PASTED = re.compile(r"\b(?:https?://|www\.)\S+|<(\w+)[^>\n]*>\n.*?\n</\1>"
+                    r"|^\[(?:File|Attached file)\b[^\n]*", re.S | re.M)
 
 
 def _fold(text):
@@ -259,6 +261,15 @@ def cmd_index(argv):
 def build_index(root):
     chunks, df = [], {}
     files = 0
+    # Generated output the repo ignores (results/, coverage, caches) is not
+    # code anyone edits. Tracked plus untracked-not-ignored; None outside git.
+    try:
+        listed = set(subprocess.run(
+            ["git", "-C", root, "ls-files", "-co", "--exclude-standard", "-z"],
+            capture_output=True, check=True, timeout=30).stdout
+            .decode("utf-8", "replace").split("\0"))
+    except (OSError, subprocess.SubprocessError):
+        listed = None
     for dirpath, dirnames, filenames in os.walk(root):
         if files >= MAX_FILES:
             break
@@ -268,6 +279,9 @@ def build_index(root):
             if os.path.splitext(name)[1] not in EXTS or SECRET_FILE.search(name):
                 continue
             full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            if listed is not None and rel not in listed:
+                continue
             try:
                 if os.path.getsize(full) > MAX_FILE:
                     continue
@@ -276,9 +290,6 @@ def build_index(root):
             except OSError:
                 continue
             files += 1
-            # "/" everywhere: the pointer handed to the model reads the same on
-            # Windows as on Linux, and "/" is a valid separator on both.
-            rel = os.path.relpath(full, root).replace(os.sep, "/")
             ext = os.path.splitext(name)[1]
             if text.endswith("\n"):
                 text = text[:-1]
@@ -452,7 +463,7 @@ def hook_hits(cwd, prompt, transcript=None):
     idx = find_index(cwd)
     if not idx or not idx.get("chunks"):
         return []
-    hits = _hits(idx, prompt)
+    hits = _hits(idx, PASTED.sub(" ", prompt))
     if hits and transcript:
         # Only now pay for reading the transcript: most prompts end above.
         read = session_reads(transcript)

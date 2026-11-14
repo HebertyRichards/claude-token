@@ -59,7 +59,9 @@ the request, or when the request already names a file small enough to be read
 whole. A request also needs an anchor: an identifier (camelCase, snake_case,
 `` `quoted` ``) or the name of an indexed file, and the pointed-at code has to
 hold it — plain words are not a location. In requests about git, PRs, issues
-or running a command only an identifier counts. Files the session already
+or running a command only an identifier counts. Pasted URLs and attachment
+blocks are not read for anchors (`utm_campaign` in a link is not code), and
+files the repo's `.gitignore` excludes are not indexed. Files the session already
 read or edited since the last `/compact` are never pointed at again.
 Overlapping ranges of one file are merged into one pointer.
 
